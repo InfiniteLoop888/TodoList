@@ -1,5 +1,7 @@
 import json
 
+from config_paths import mirror_user_ini_to_application_dir
+
 
 class TODOParser:
     DEFAULT_LIST_NAME = "默认清单"
@@ -79,6 +81,7 @@ class TODOParser:
                 ensure_ascii=False,
                 indent=2
             )
+        mirror_user_ini_to_application_dir(self.path)
 
     def add(self, text: str):
         """

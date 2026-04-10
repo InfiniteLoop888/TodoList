@@ -1,6 +1,9 @@
 """
 用户配置目录：系统「文档」文件夹下的 TodoList（Windows 即「文档」/ 资源管理器中的「我的文档」）。
 首次运行时若该目录或 ini 不存在，则从程序所在目录复制同名文件，便于升级版本后保留设置。
+
+每次将 ini 写入用户目录后，会同步复制一份到程序目录（见 mirror_user_ini_to_application_dir），
+便于开发时直接看到项目根目录下的 options.ini / todos.ini 与运行态一致。
 """
 
 import shutil
@@ -81,3 +84,20 @@ def ensure_user_ini_files() -> Tuple[str, str]:
     opt = ensure_one(_OPTIONS_NAME, _default_options_ini_text())
     todo = ensure_one(_TODOS_NAME, None)
     return opt, todo
+
+
+def mirror_user_ini_to_application_dir(user_file_path: str) -> None:
+    """
+    将已写入「文档/TodoList」下的 ini 复制到程序所在目录（同名文件）。
+    源与目标为同一路径时跳过；复制失败时静默忽略（例如目录只读）。
+    """
+    try:
+        src = Path(user_file_path).resolve()
+        if not src.is_file():
+            return
+        dst = (application_dir() / src.name).resolve()
+        if src == dst:
+            return
+        shutil.copy2(src, dst)
+    except OSError:
+        pass

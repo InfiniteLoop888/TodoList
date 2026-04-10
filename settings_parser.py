@@ -1,3 +1,5 @@
+from config_paths import mirror_user_ini_to_application_dir
+
 
 class SettingsParser:
     def __init__(self, path):
@@ -43,6 +45,7 @@ class SettingsParser:
             ini_file.write(f"{key} = {value}\n")
 
         ini_file.close()
+        mirror_user_ini_to_application_dir(self.ini_path)
 
     @staticmethod
     def _match_type(string: str):
