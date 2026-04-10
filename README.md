@@ -1,5 +1,9 @@
 # TodoList
 
+<p align="center">
+  <img src="assets/readme/image.png" alt="TodoList 界面预览" />
+</p>
+
 基于 [PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI/) 的跨平台桌面待办应用，在原作者项目基础上做了功能与体验上的扩展。
 
 ## 致谢与来源
