@@ -2695,8 +2695,7 @@ class SettingsPanel(ThemedOptionCardPlane):
         super().reloadStyleSheet()
         text_d = SiGlobal.siui.colors["TEXT_D"]
         self.settings_footer_credits.setText(
-            '<span style="color:{}; font-size:11px;">可爱湘</span> '
-            '<span style="color:#e53935; font-size:11px;">♥</span>'.format(text_d)
+            '<span style="color:{}; font-size:11px;">InfiniteLoop888</span> '
         )
         self.translucent_opacity_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.todo_font_px_input.setStyleSheet(
