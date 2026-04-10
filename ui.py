@@ -2674,6 +2674,7 @@ class SettingsPanel(ThemedOptionCardPlane):
 
         self.settings_footer_credits = SiLabel(self)
         self.settings_footer_credits.setTextFormat(Qt.RichText)
+        self.settings_footer_credits.setOpenExternalLinks(True)
         self.settings_footer_credits.setAlignment(Qt.AlignCenter)
         self.settings_footer_credits.setAutoAdjustSize(True)
         self.settings_footer_credits.setHint("")
@@ -2695,7 +2696,8 @@ class SettingsPanel(ThemedOptionCardPlane):
         super().reloadStyleSheet()
         text_d = SiGlobal.siui.colors["TEXT_D"]
         self.settings_footer_credits.setText(
-            '<span style="color:{}; font-size:11px;">InfiniteLoop888</span> '
+            '<a href="https://github.com/InfiniteLoop888/TodoList" '
+            'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
         )
         self.translucent_opacity_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.todo_font_px_input.setStyleSheet(
