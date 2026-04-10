@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSlider,
     QStyle,
     QSystemTrayIcon,
@@ -431,6 +432,8 @@ class SingleTODOOption(SiDenseHContainer):
     TODO_ROW_SPACING = 6
     # SiCheckBox 内部：方框与内置占位文字的间距（默认 8）
     TODO_CHECKBOX_TEXT_GAP = 3
+    # 有提醒图标时，给文本额外留出的安全右边距，避免贴到图标
+    TODO_REMINDER_TEXT_RIGHT_PADDING = 10
 
     def __init__(self, todo_panel, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -460,9 +463,9 @@ class SingleTODOOption(SiDenseHContainer):
         self.text_label.setFont(todo_item_font_qfont())
         self.text_label.resize(500 - 48 - 48 - 32, 32)
         self.text_label.setWordWrap(True)
-        self.text_label.setAutoAdjustSize(True)
+        self.text_label.setAutoAdjustSize(False)
         self.text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.text_label.setFixedStyleSheet("padding-top: 2px; padding-bottom: 2px")
+        self.text_label.setFixedStyleSheet("padding-top: 0px; padding-bottom: 0px")
 
         self.clock_icon = SiSvgLabel(self)
         icon_size = max(14, px + 2)
@@ -484,6 +487,8 @@ class SingleTODOOption(SiDenseHContainer):
         # 初始化时自动载入样式表
         self.reloadStyleSheet()
 
+        self._inline_edit = None
+
     def apply_todo_typography(self):
         px = todo_item_font_px()
         f = todo_item_font_qfont()
@@ -497,7 +502,29 @@ class SingleTODOOption(SiDenseHContainer):
         self.clock_icon.setSvgSize(icon_size, icon_size)
         self.clock_icon.resize(icon_size + 8, icon_size + 8)
 
-        self.text_label.adjustSize()
+        self._relayout_text_and_height()
+
+    def _relayout_text_and_height(self, total_width=None):
+        if total_width is None:
+            total_width = self.width()
+        reserve = self.check_box.width() + self.spacing
+        if not self.clock_icon.isHidden():
+            reserve += self.clock_icon.width() + self.spacing + self.TODO_REMINDER_TEXT_RIGHT_PADDING
+        text_width = max(1, int(total_width) - reserve)
+        self.text_label.setFixedWidth(text_width)
+
+        metrics = QFontMetrics(self.text_label.font())
+        text = self.text_label.text() or ""
+        text_rect = metrics.boundingRect(
+            QRect(0, 0, text_width, 100000),
+            int(Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop),
+            text,
+        )
+        text_height = max(metrics.height(), text_rect.height()) + 4
+        self.text_label.setFixedHeight(text_height)
+
+        if self._inline_edit is not None:
+            self._inline_edit.setGeometry(self.text_label.geometry())
         self.adjustSize()
 
     def mousePressEvent(self, event):
@@ -566,13 +593,13 @@ class SingleTODOOption(SiDenseHContainer):
     def _refresh_done_appearance(self):
         if self.check_box.isChecked():
             self.text_label.setStyleSheet(
-                "color: {}; text-decoration: line-through; padding-top: 2px; padding-bottom: 2px".format(
+                "color: {}; text-decoration: line-through; padding-top: 0px; padding-bottom: 0px".format(
                     SiGlobal.siui.colors["TEXT_D"]
                 )
             )
         else:
             self.text_label.setStyleSheet(
-                "color: {}; padding-top: 2px; padding-bottom: 2px".format(
+                "color: {}; padding-top: 0px; padding-bottom: 0px".format(
                     SiGlobal.siui.colors["TEXT_B"]
                 )
             )
@@ -588,6 +615,7 @@ class SingleTODOOption(SiDenseHContainer):
 
     def setText(self, text: str):
         self.text_label.setText(text)
+        self._relayout_text_and_height()
 
     def setDone(self, done: bool):
         self.check_box.blockSignals(True)
@@ -604,7 +632,7 @@ class SingleTODOOption(SiDenseHContainer):
             self.clock_icon.setHint("提醒时间: " + t.strftime("%Y-%m-%d %H:%M"))
         else:
             self.clock_icon.hide()
-        self.adjustSize()
+        self._relayout_text_and_height()
 
     def adjustSize(self):
         heights = [self.text_label.height(), self.check_box.height()]
@@ -614,12 +642,71 @@ class SingleTODOOption(SiDenseHContainer):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        reserve = self.check_box.width() + self.spacing
-        if not self.clock_icon.isHidden():
-            reserve += self.clock_icon.width() + self.spacing
-        self.text_label.setFixedWidth(max(1, event.size().width() - reserve))
+        self._relayout_text_and_height(event.size().width())
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and not self._dragging:
+            self._startInlineEdit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _startInlineEdit(self):
+        if self._inline_edit is not None:
+            return
+        current_text = self.text_label.text()
+        self._inline_edit = QLineEdit(self)
+        self._inline_edit.setText(current_text)
+        self._inline_edit.setFont(self.text_label.font())
+        self._inline_edit.setGeometry(self.text_label.geometry())
+        self._inline_edit.setStyleSheet(
+            "border: 1px solid {}; background-color: {}; color: {}; "
+            "border-radius: 4px; padding: 1px 4px;".format(
+                SiGlobal.siui.colors["BORDER_COLOR"],
+                SiGlobal.siui.colors["BACKGROUND_DARK_COLOR"],
+                SiGlobal.siui.colors["TEXT_B"],
+            )
+        )
+        self.text_label.hide()
+        self._inline_edit.show()
+        self._inline_edit.setFocus()
+        self._inline_edit.selectAll()
+        self._inline_edit.returnPressed.connect(self._finishInlineEdit)
+        self._inline_edit.installEventFilter(self)
+
+    def _finishInlineEdit(self):
+        if self._inline_edit is None:
+            return
+        new_text = self._inline_edit.text().strip()
+        if new_text:
+            self.text_label.setText(new_text)
+        self.text_label.show()
+        self._inline_edit.removeEventFilter(self)
+        self._inline_edit.deleteLater()
+        self._inline_edit = None
         self.text_label.adjustSize()
         self.adjustSize()
+        if self.todo_panel:
+            self.todo_panel._syncCurrentListFromUI()
+            self.todo_panel.adjustSize()
+
+    def _cancelInlineEdit(self):
+        if self._inline_edit is None:
+            return
+        self.text_label.show()
+        self._inline_edit.removeEventFilter(self)
+        self._inline_edit.deleteLater()
+        self._inline_edit = None
+
+    def eventFilter(self, obj, event):
+        if obj is self._inline_edit:
+            if event.type() == QEvent.FocusOut:
+                self._finishInlineEdit()
+                return True
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self._cancelInlineEdit()
+                return True
+        return super().eventFilter(obj, event)
 
 
 class AppHeaderPanel(SiLabel):
@@ -723,7 +810,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.body().setUseMoveTo(False)
         self.body().setShrinking(True)
         self.body().setAdjustWidgetsSize(True)
-        self.body().setSpacing(6)
+        self.body().setSpacing(0)
 
         self.list_sidebar = SiDenseVContainer(self)
         self.list_sidebar.setShrinking(True)
@@ -757,7 +844,44 @@ class TODOListPanel(ThemedOptionCardPlane):
         self._sidebar_sync_attachment_right(self.new_list_button)
         self.new_list_button.installEventFilter(self)
 
-        self.todo_content = self.body()
+        self.todo_scroll_area = QScrollArea(self.body())
+        self.todo_scroll_area.setWidgetResizable(False)
+        self.todo_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.todo_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.todo_scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.todo_scroll_area.setStyleSheet("background: transparent; border: none;")
+
+        self.todo_content = SiDenseVContainer()
+        self.todo_content.setShrinking(True)
+        self.todo_content.setAdjustWidgetsSize(True)
+        self.todo_content.setSpacing(6)
+        self.todo_scroll_area.setWidget(self.todo_content)
+        self.body().addWidget(self.todo_scroll_area)
+
+        # 底部拖动调整高度
+        self._user_body_height = None
+        self._resizing_bottom = False
+        self._resizing_right = False
+        self._resizing_corner = False
+        self._resize_start_y = 0
+        self._resize_start_x = 0
+        self._resize_start_height = 0
+        self._resize_start_window_width = 0
+        self._resize_handle = QWidget(self)
+        self._resize_handle.setCursor(Qt.SizeVerCursor)
+        self._resize_handle.setMouseTracking(True)
+        self._resize_handle.setStyleSheet("background: transparent;")
+        self._resize_handle.installEventFilter(self)
+        self._right_resize_handle = QWidget(self)
+        self._right_resize_handle.setCursor(Qt.SizeHorCursor)
+        self._right_resize_handle.setMouseTracking(True)
+        self._right_resize_handle.setStyleSheet("background: transparent;")
+        self._right_resize_handle.installEventFilter(self)
+        self._corner_resize_handle = QWidget(self)
+        self._corner_resize_handle.setCursor(Qt.SizeFDiagCursor)
+        self._corner_resize_handle.setMouseTracking(True)
+        self._corner_resize_handle.setStyleSheet("background: transparent;")
+        self._corner_resize_handle.installEventFilter(self)
 
         self.no_todo_placeholder = SiLabel(self.todo_content)
         self.no_todo_placeholder.setVisible(False)
@@ -875,6 +999,31 @@ class TODOListPanel(ThemedOptionCardPlane):
                 SiGlobal.siui.colors["TEXT_B"],
             )
         )
+        self.todo_scroll_area.setStyleSheet(
+            """
+            QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 8px;
+                margin: 2px 0 2px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {};
+                border-radius: 4px;
+                min-height: 28px;
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {{
+                background: transparent;
+                height: 0px;
+            }}
+            """.format(Color.transparency(SiGlobal.siui.colors["TEXT_D"], 0.7))
+        )
 
     def _onCompleteAllButtonClicked(self):
         for obj in self._todoWidgets():
@@ -885,6 +1034,20 @@ class TODOListPanel(ThemedOptionCardPlane):
         for w in self._todoWidgets():
             w.apply_todo_typography()
         self.adjustSize()
+
+    def _sync_todo_scroll_area(self):
+        for _ in range(2):
+            viewport_width = max(1, self.todo_scroll_area.viewport().width())
+            if self.todo_content.width() != viewport_width:
+                self.todo_content.setFixedWidth(viewport_width)
+            self.todo_content.adjustSize()
+
+    def _target_body_height(self):
+        natural_height = max(20, self.todo_content.height())
+        user_body_height = getattr(self, "_user_body_height", None)
+        if user_body_height is not None:
+            return max(20, user_body_height)
+        return natural_height
 
     def _setInlineAddVisible(self, visible):
         if visible:
@@ -1538,6 +1701,64 @@ class TODOListPanel(ThemedOptionCardPlane):
         anim.start()
 
     def eventFilter(self, obj, event):
+        if hasattr(self, '_resize_handle') and obj is self._resize_handle:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._resizing_bottom = True
+                self._resize_start_y = event.globalPos().y()
+                self._resize_start_height = self.body().height()
+                obj.grabMouse()
+                return True
+            elif event.type() == QEvent.MouseMove and self._resizing_bottom:
+                delta = event.globalPos().y() - self._resize_start_y
+                self._user_body_height = max(20, self._resize_start_height + delta)
+                self.adjustSize()
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                self._resizing_bottom = False
+                obj.releaseMouse()
+                return True
+            elif event.type() == QEvent.MouseButtonDblClick:
+                self._user_body_height = None
+                self.adjustSize()
+                return True
+
+        if hasattr(self, '_right_resize_handle') and obj is self._right_resize_handle:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._resizing_right = True
+                self._resize_start_x = event.globalPos().x()
+                self._resize_start_window_width = getattr(self.window(), "container_v", self).width()
+                obj.grabMouse()
+                return True
+            elif event.type() == QEvent.MouseMove and self._resizing_right:
+                delta_x = event.globalPos().x() - self._resize_start_x
+                self._apply_main_window_width(self._resize_start_window_width + delta_x)
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                self._resizing_right = False
+                obj.releaseMouse()
+                return True
+
+        if hasattr(self, '_corner_resize_handle') and obj is self._corner_resize_handle:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._resizing_corner = True
+                self._resize_start_x = event.globalPos().x()
+                self._resize_start_y = event.globalPos().y()
+                self._resize_start_window_width = getattr(self.window(), "container_v", self).width()
+                self._resize_start_height = self.body().height()
+                obj.grabMouse()
+                return True
+            elif event.type() == QEvent.MouseMove and self._resizing_corner:
+                delta_x = event.globalPos().x() - self._resize_start_x
+                delta_y = event.globalPos().y() - self._resize_start_y
+                self._apply_main_window_width(self._resize_start_window_width + delta_x)
+                self._user_body_height = max(20, self._resize_start_height + delta_y)
+                self.adjustSize()
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                self._resizing_corner = False
+                obj.releaseMouse()
+                return True
+
         if event.type() == QEvent.Enter:
             rw = getattr(obj, "_sidebar_rest_width", None)
             if rw is not None:
@@ -1602,14 +1823,36 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.list_sidebar.raise_()
         self._sidebar_stretch_attachments()
 
+    def _apply_main_window_width(self, container_width):
+        main_window = self.window()
+        if main_window is None or not hasattr(main_window, "_apply_container_width"):
+            return
+        main_window._apply_container_width(container_width)
+        main_window.adjustSize()
+
     def adjustSize(self):
         self._updateSplitLayout()
+        self._sync_todo_scroll_area()
+        self.todo_scroll_area.setFixedHeight(self._target_body_height())
         self.body().adjustSize()
         super().adjustSize()
+        self._sync_todo_scroll_area()
         self._updateNoTodoLabelGeometry()
+        self._update_resize_handle()
+
+    def _update_resize_handle(self):
+        if hasattr(self, '_resize_handle'):
+            self._resize_handle.setGeometry(0, self.height() - 8, max(1, self.width() - 10), 8)
+            self._resize_handle.raise_()
+        if hasattr(self, '_right_resize_handle'):
+            self._right_resize_handle.setGeometry(self.width() - 8, 0, 8, max(1, self.height() - 10))
+            self._right_resize_handle.raise_()
+        if hasattr(self, '_corner_resize_handle'):
+            self._corner_resize_handle.setGeometry(self.width() - 10, self.height() - 10, 10, 10)
+            self._corner_resize_handle.raise_()
 
     def _updateNoTodoLabelGeometry(self):
-        self.no_todo_placeholder.resize(self.todo_content.width(), self.no_todo_placeholder.height())
+        self.no_todo_placeholder.resize(self.todo_scroll_area.viewport().width(), self.no_todo_placeholder.height())
         self.no_todo_label.move(0, 0)
         self.no_todo_label.resize(self.no_todo_placeholder.width(), self.no_todo_placeholder.height())
 
@@ -1628,7 +1871,9 @@ class TODOListPanel(ThemedOptionCardPlane):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._updateSplitLayout()
+        self._sync_todo_scroll_area()
         self._updateNoTodoLabelGeometry()
+        self._update_resize_handle()
 
 
 class AddNewTODOPanel(ThemedOptionCardPlane):
@@ -3171,6 +3416,7 @@ class TODOApplication(QMainWindow):
         # 窗口周围留白，供阴影使用
         self.padding = 48
         self.extra_left_space = 112
+        self.min_container_width = 420
         self.anchor = QPoint(self.x(), self.y())
         self.fixed_position = QPoint(0, 0)
 
@@ -3208,12 +3454,12 @@ class TODOApplication(QMainWindow):
         # 构建界面
         # 头
         self.header_panel = AppHeaderPanel(self)
-        self.header_panel.setFixedWidth(500 - 2 * self.padding)
+        self.header_panel.setFixedWidth(self.container_v.width() - 2 * self.padding)
         self.header_panel.setFixedHeight(48 + 12)
 
         # 设置面板
         self.settings_panel = SettingsPanel(self)
-        self.settings_panel.setFixedWidth(500 - 2 * self.padding)
+        self.settings_panel.setFixedWidth(self.container_v.width() - 2 * self.padding)
         self.settings_panel.adjustSize()
 
         self.settings_panel_placeholder = SiLabel(self)
@@ -3222,7 +3468,7 @@ class TODOApplication(QMainWindow):
 
         # 待办列表面板（标题为当前清单名）
         self.todo_list_panel = TODOListPanel(self)
-        self.todo_list_panel.setFixedWidth(500 - 2 * self.padding)
+        self.todo_list_panel.setFixedWidth(self.container_v.width() - 2 * self.padding)
         self.todo_list_panel.attachSidebarHost(self)
 
         self.todo_list_panel_placeholder = SiLabel(self)
@@ -3449,6 +3695,32 @@ class TODOApplication(QMainWindow):
         self.resize(self.width(), h)
         self.container_v.adjustSize()
 
+    def _apply_container_width(self, container_width):
+        container_width = max(self.min_container_width, int(container_width))
+        panel_width = max(200, container_width - 2 * self.padding)
+
+        self.container_v.setFixedWidth(container_width)
+        self.header_panel.setFixedWidth(panel_width)
+        self.settings_panel.setFixedWidth(panel_width)
+        self.todo_list_panel.setFixedWidth(panel_width)
+
+        if self.header_panel.settings_button.isChecked():
+            self.settings_panel.adjustSize()
+        else:
+            self.settings_panel.resize(panel_width, 0)
+
+        if self.header_panel.unfold_button.isChecked():
+            self.todo_list_panel.adjustSize()
+        else:
+            self.todo_list_panel.resize(panel_width, 0)
+
+        self.container_v.adjustSize()
+        self.resize(container_width + self.extra_left_space, self.height())
+        self._update_resize_handles()
+
+    def _update_resize_handles(self):
+        return
+
     def resizeEvent(self, a0):
         super().resizeEvent(a0)
         extra_left = getattr(self, "extra_left_space", 0)
@@ -3535,6 +3807,9 @@ class TODOApplication(QMainWindow):
         self._dragging_by_header = False
         if SiGlobal.todo_list.position_locked is True:
             self.moveTo(self.fixed_position.x(), self.fixed_position.y())
+
+    def eventFilter(self, obj, event):
+        return super().eventFilter(obj, event)
 
     def closeEvent(self, a0):
         if getattr(self, "tray_icon", None) is not None:

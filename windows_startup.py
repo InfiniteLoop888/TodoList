@@ -13,12 +13,21 @@ def startup_supported() -> bool:
     return sys.platform == "win32"
 
 
+def _pythonw_if_available(py: str) -> str:
+    """无控制台启动 GUI：优先用同目录 pythonw.exe，避免登录自启弹出终端。"""
+    base, name = os.path.split(py)
+    if name.lower() != "python.exe":
+        return py
+    pyw = os.path.join(base, "pythonw.exe")
+    return pyw if os.path.isfile(pyw) else py
+
+
 def _launch_command() -> str:
     if getattr(sys, "frozen", False):
         exe = os.path.abspath(sys.executable)
         return f'"{exe}"'
     script = os.path.abspath(sys.argv[0])
-    py = os.path.abspath(sys.executable)
+    py = _pythonw_if_available(os.path.abspath(sys.executable))
     return f'"{py}" "{script}"'
 
 

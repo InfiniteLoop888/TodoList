@@ -410,7 +410,7 @@ class SiCheckBox(SiLabel):
         self.indicator.move(0, (h - s) // 2)
         self.indicator_label.move(0, (h - s) // 2)
         self.indicator_icon.move(0, (h - s) // 2)
-        self.text_label.move(s + g, (h - self.text_label.height()) // 2 - 1)  # 减1是为了让偏下的文字显示正常一点
+        self.text_label.move(s + g, (h - self.text_label.height()) // 2 - 1)
 
     def showEvent(self, a0):
         super().showEvent(a0)
