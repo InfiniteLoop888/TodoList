@@ -1,5 +1,6 @@
 import os
 import calendar
+import heapq
 from datetime import datetime, date, timedelta
 
 from components import ThemedOptionCardPlane
@@ -409,6 +410,38 @@ def settings_icon_svg_data():
     return None
 
 
+SYSTEM_LIST_LABELS = {
+    TODOParser.SYSTEM_ARCHIVE_LIST: "归档",
+    TODOParser.SYSTEM_TRASH_LIST: "回收站",
+}
+
+
+def list_display_name(list_name):
+    return SYSTEM_LIST_LABELS.get(str(list_name), str(list_name))
+
+
+def ensure_todo_parser():
+    parser = SiGlobal.todo_list.todos_parser
+    parser.ensure_required_lists()
+    return parser
+
+
+def refresh_todo_views_from_parser(reload_main_panel=False):
+    parser = ensure_todo_parser()
+    main_window = SiGlobal.siui.windows.get("MAIN_WINDOW")
+    if reload_main_panel and main_window is not None and hasattr(main_window, "todo_list_panel"):
+        panel = main_window.todo_list_panel
+        saved_list = panel.current_list_name
+        panel.loadLists(parser.lists)
+        if saved_list in panel.todo_lists:
+            panel._setCurrentList(saved_list, sync_before_switch=False, save_to_disk=False)
+    calendar_window = SiGlobal.siui.windows.get("CALENDAR_WINDOW")
+    if calendar_window is not None and hasattr(calendar_window, "calendar_panel"):
+        calendar_window.calendar_panel.update_calendar()
+    if main_window is not None and hasattr(main_window, "rebuildReminderSchedule"):
+        main_window.rebuildReminderSchedule()
+
+
 class SingleSettingOption(SiDenseVContainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -489,8 +522,12 @@ class SingleTODOOption(SiDenseHContainer):
         self.addWidget(self.clock_icon, "right")
 
         self.reminder_data = None
+        self.todo_id = TODOParser.generate_todo_id()
         self.order_key = 0
         self.completed_rank = None
+        self.origin_list = None
+        self.deleted_at = None
+        self.archived_at = None
         
         self.move = self.moveTo
 
@@ -630,6 +667,12 @@ class SingleTODOOption(SiDenseHContainer):
     def setText(self, text: str):
         self.text_label.setText(text)
         self._relayout_text_and_height()
+
+    def setTodoMeta(self, todo_id=None, origin_list=None, deleted_at=None, archived_at=None):
+        self.todo_id = str(todo_id).strip() if todo_id else TODOParser.generate_todo_id()
+        self.origin_list = origin_list
+        self.deleted_at = deleted_at
+        self.archived_at = archived_at
 
     def setOrderData(self, order_key, completed_rank=None):
         try:
@@ -833,6 +876,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.setUseSignals(True)
         self.todo_lists = {}
         self.current_list_name = ""
+        self._previous_regular_list_name = ""
         self.list_buttons = {}
         self.sidebar_host = self
 
@@ -976,6 +1020,18 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.complete_all_button.setHint("全部完成")
         self.complete_all_button.clicked.connect(self._onCompleteAllButtonClicked)
 
+        self.archive_button = SiSimpleButton(self)
+        self.archive_button.resize(32, 32)
+        self.archive_button.setHint("查看归档")
+        self.archive_button.clicked.connect(lambda: self._openSystemList(TODOParser.SYSTEM_ARCHIVE_LIST))
+
+        self.trash_button = SiSimpleButton(self)
+        self.trash_button.resize(32, 32)
+        self.trash_button.setHint("查看回收站")
+        self.trash_button.clicked.connect(lambda: self._openSystemList(TODOParser.SYSTEM_TRASH_LIST))
+
+        self.footer().addWidget(self.trash_button, "right")
+        self.footer().addWidget(self.archive_button, "right")
         self.footer().addWidget(self.complete_all_button, "right")
 
         # 全局方法
@@ -987,6 +1043,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.todoAmountChanged.emit(todo_amount)
 
         if todo_amount == 0:
+            self.no_todo_label.setText(self._emptyPlaceholderText())
             self.no_todo_placeholder.setFixedHeight(150)
             self.no_todo_placeholder.show()
             self.no_todo_label.show()
@@ -1012,7 +1069,12 @@ class TODOListPanel(ThemedOptionCardPlane):
         self._sidebar_sync_attachment_right(self.new_list_button)
         self.no_todo_label.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_E"]))
         self.add_todo_button.attachment().load(SiGlobal.siui.icons["fi-rr-apps-add"])
+        self.archive_button.attachment().load(
+            SiGlobal.siui.icons.get("fi-rr-box", SiGlobal.siui.icons.get("fi-rr-folder", SiGlobal.siui.icons["fi-rr-list-check"]))
+        )
+        self.trash_button.attachment().load(SiGlobal.siui.icons.get("fi-rr-trash", SiGlobal.siui.icons["fi-rr-cross"]))
         self.complete_all_button.attachment().load(SiGlobal.siui.icons["fi-rr-list-check"])
+        self._updateSystemViewButtonsState()
         self.inline_add_confirm_button.attachment().load(SiGlobal.siui.icons["fi-rr-check"])
         self.inline_add_cancel_button.attachment().load(SiGlobal.siui.icons["fi-rr-cross"])
         self.inline_add_text_edit.setFont(todo_item_font_qfont())
@@ -1058,6 +1120,8 @@ class TODOListPanel(ThemedOptionCardPlane):
         )
 
     def _onCompleteAllButtonClicked(self):
+        if self._isSystemListCurrent():
+            return
         for obj in self._todoWidgets():
             obj.check_box.setChecked(True)
 
@@ -1128,6 +1192,8 @@ class TODOListPanel(ThemedOptionCardPlane):
         return new_todo
 
     def addTODO(self, text):
+        if self._isSystemListCurrent():
+            return
         new_todo = self._addTODOWidget(text, order_key=self._next_order_key())
         self._reposition_todo_by_rule(new_todo)
         self._syncCurrentListFromUI()
@@ -1137,16 +1203,30 @@ class TODOListPanel(ThemedOptionCardPlane):
     def _todoWidgets(self):
         return [widget for widget in self.todo_content.widgets_top if isinstance(widget, SingleTODOOption)]
 
+    def _visibleListNames(self):
+        return [
+            list_name
+            for list_name in self.todo_lists.keys()
+            if not TODOParser.is_system_list_name(list_name)
+        ]
+
+    def _isSystemListCurrent(self):
+        return TODOParser.is_system_list_name(self.current_list_name)
+
     def _syncCurrentListFromUI(self, save_to_disk=True):
         if self.current_list_name == "":
             return
         self.todo_lists[self.current_list_name] = [
             {
+                "id": getattr(widget, "todo_id", TODOParser.generate_todo_id()),
                 "text": widget.text_label.text(),
                 "done": widget.check_box.isChecked(),
                 "reminder": getattr(widget, "reminder_data", None),
                 "order_key": getattr(widget, "order_key", 0),
                 "completed_rank": getattr(widget, "completed_rank", None),
+                "origin_list": getattr(widget, "origin_list", None),
+                "deleted_at": getattr(widget, "deleted_at", None),
+                "archived_at": getattr(widget, "archived_at", None),
             }
             for widget in self._todoWidgets()
         ]
@@ -1155,9 +1235,11 @@ class TODOListPanel(ThemedOptionCardPlane):
 
     def _save_lists_to_disk(self):
         todo_lists_copy = {list_name: list(todos) for list_name, todos in self.todo_lists.items()}
-        SiGlobal.todo_list.todos_parser.lists = todo_lists_copy
-        SiGlobal.todo_list.todos_parser.todos = list(next(iter(todo_lists_copy.values()))) if todo_lists_copy else []
-        SiGlobal.todo_list.todos_parser.write()
+        parser = ensure_todo_parser()
+        parser.lists = parser._ensure_required_lists(todo_lists_copy)
+        parser.todos = list(next(iter(parser.user_lists().values()), []))
+        parser.write()
+        refresh_todo_views_from_parser(reload_main_panel=False)
 
     def _clearTodosInUI(self):
         for widget in list(self._todoWidgets()):
@@ -1307,7 +1389,7 @@ class TODOListPanel(ThemedOptionCardPlane):
             self._clear_list_buttons_layout()
             self.list_buttons = {}
 
-            for list_name in self.todo_lists.keys():
+            for list_name in self._visibleListNames():
                 button = SiToggleButton(self.list_items_container)
                 bw = self._width_for_sidebar_text(list_name)
                 button._sidebar_rest_width = bw
@@ -1378,25 +1460,40 @@ class TODOListPanel(ThemedOptionCardPlane):
             self._syncCurrentListFromUI(save_to_disk=False)
 
         self.current_list_name = list_name
+        if not TODOParser.is_system_list_name(list_name):
+            self._previous_regular_list_name = list_name
         self._clearTodosInUI()
         self._setInlineAddVisible(False)
         for todo in self.todo_lists.get(list_name, []):
             if isinstance(todo, dict):
+                todo_id = todo.get("id")
                 text = str(todo.get("text", ""))
                 done = bool(todo.get("done", False))
                 reminder = todo.get("reminder", None)
                 order_key = int(todo.get("order_key", 0))
                 completed_rank = todo.get("completed_rank", None)
+                origin_list = todo.get("origin_list", None)
+                deleted_at = todo.get("deleted_at", None)
+                archived_at = todo.get("archived_at", None)
             else:
+                todo_id = None
                 text = str(todo)
                 done = False
                 reminder = None
                 order_key = 0
                 completed_rank = None
-            self._addTODOWidget(text, done, reminder, order_key, completed_rank)
+                origin_list = None
+                deleted_at = None
+                archived_at = None
+            widget = self._addTODOWidget(text, done, reminder, order_key, completed_rank)
+            widget.setTodoMeta(todo_id, origin_list, deleted_at, archived_at)
 
         self._refreshListButtonsState()
         self._update_panel_title()
+        self._updateSystemViewButtonsState()
+        allow_editing = not TODOParser.is_system_list_name(list_name)
+        self.add_todo_button.setEnabled(allow_editing)
+        self.complete_all_button.setEnabled(allow_editing)
         self.adjustSize()
         self.updateTODOAmount()
         if save_to_disk:
@@ -1405,13 +1502,45 @@ class TODOListPanel(ThemedOptionCardPlane):
     def _update_panel_title(self):
         name = (self.current_list_name or "").strip()
         if name and name in self.todo_lists:
-            self.setTitle(name)
+            self.setTitle(list_display_name(name))
         elif self.todo_lists:
-            self.setTitle(next(iter(self.todo_lists.keys())))
+            self.setTitle(list_display_name(next(iter(self.todo_lists.keys()))))
         else:
             self.setTitle("")
 
+    def _updateSystemViewButtonsState(self):
+        on_bg = Color.transparency(SiGlobal.siui.colors["THEME_TRANSITION_A"], 0.38)
+        states = (
+            (self.archive_button, self.current_list_name == TODOParser.SYSTEM_ARCHIVE_LIST, "查看归档"),
+            (self.trash_button, self.current_list_name == TODOParser.SYSTEM_TRASH_LIST, "查看回收站"),
+        )
+        for button, active, default_hint in states:
+            button.setColor(on_bg if active else "#00FFFFFF")
+            button.setHint("返回上一清单" if active else default_hint)
+
+    def _emptyPlaceholderText(self):
+        if self.current_list_name == TODOParser.SYSTEM_ARCHIVE_LIST:
+            return "归档里还没有内容"
+        if self.current_list_name == TODOParser.SYSTEM_TRASH_LIST:
+            return "回收站是空的"
+        return "当前没有待办哦"
+
     def _onListButtonClicked(self, list_name):
+        self._setCurrentList(list_name)
+
+    def _openSystemList(self, list_name):
+        parser = ensure_todo_parser()
+        if list_name not in parser.lists:
+            return
+        if self.current_list_name == list_name:
+            visible_lists = self._visibleListNames()
+            fallback_list = self._previous_regular_list_name
+            if fallback_list not in visible_lists:
+                fallback_list = visible_lists[0] if visible_lists else TODOParser.DEFAULT_LIST_NAME
+            self.todo_lists = parser.lists
+            self._setCurrentList(fallback_list)
+            return
+        self.todo_lists = parser.lists
         self._setCurrentList(list_name)
 
     @staticmethod
@@ -1422,7 +1551,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         if list_name not in self.todo_lists:
             return
 
-        keys = list(self.todo_lists.keys())
+        keys = self._visibleListNames()
         idx = keys.index(list_name)
         last_i = len(keys) - 1
 
@@ -1436,6 +1565,10 @@ class TODOListPanel(ThemedOptionCardPlane):
         act_clear = QAction(self._menu_icon_from_svg_key("fi-rr-trash"), "清除内容", self)
         act_clear.triggered.connect(lambda: self._clear_list_contents(list_name))
         menu.addAction(act_clear)
+
+        act_archive = QAction(self._menu_icon_from_svg_key("fi-rr-box"), "归档已完成项", self)
+        act_archive.triggered.connect(lambda: self._archive_completed_todos(list_name))
+        menu.addAction(act_archive)
 
         act_delete = QAction(self._menu_icon_from_svg_key("fi-rr-cross"), "删除分类", self)
         act_delete.triggered.connect(lambda: self._delete_list_from_context(list_name))
@@ -1485,11 +1618,14 @@ class TODOListPanel(ThemedOptionCardPlane):
     def _remove_todo_widget(self, widget):
         if widget not in self._todoWidgets():
             return
-        self.todo_content.removeWidget(widget)
-        widget.close()
-        self._syncCurrentListFromUI()
-        self.adjustSize()
-        self.updateTODOAmount()
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        moved = parser.move_todo_to_system_list(widget.todo_id, TODOParser.SYSTEM_TRASH_LIST)
+        if moved is None:
+            return
+        self.todo_lists = parser.lists
+        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._save_lists_to_disk()
 
     def _remove_reminder_from_context(self, widget):
         if widget not in self._todoWidgets():
@@ -1559,6 +1695,12 @@ class TODOListPanel(ThemedOptionCardPlane):
         todos = self._todoWidgets()
         if widget not in todos:
             return
+        if self.current_list_name == TODOParser.SYSTEM_TRASH_LIST:
+            self._show_trash_todo_context_menu(widget, pos)
+            return
+        if self.current_list_name == TODOParser.SYSTEM_ARCHIVE_LIST:
+            self._show_archive_todo_context_menu(widget, pos)
+            return
         idx = todos.index(widget)
         last_i = len(todos) - 1
 
@@ -1572,6 +1714,16 @@ class TODOListPanel(ThemedOptionCardPlane):
         act_delete = QAction(self._menu_icon_from_svg_key("fi-rr-trash"), "删除", self)
         act_delete.triggered.connect(lambda: self._remove_todo_widget(widget))
         menu.addAction(act_delete)
+
+        if not widget.check_box.isChecked():
+            act_done = QAction(self._menu_icon_from_svg_key("fi-rr-check"), "完成", self)
+            act_done.triggered.connect(lambda: widget.check_box.setChecked(True))
+            menu.addAction(act_done)
+
+        if widget.check_box.isChecked():
+            act_archive_single = QAction(self._menu_icon_from_svg_key("fi-rr-box"), "归档", self)
+            act_archive_single.triggered.connect(lambda: self._archive_single_todo(widget))
+            menu.addAction(act_archive_single)
 
         menu.addSeparator()
 
@@ -1603,12 +1755,99 @@ class TODOListPanel(ThemedOptionCardPlane):
 
         menu.exec_(widget.mapToGlobal(pos))
 
+    def _show_archive_todo_context_menu(self, widget, pos):
+        menu = QMenu(self)
+        apply_popup_menu_appearance(menu)
+
+        act_restore = QAction(self._menu_icon_from_svg_key("fi-rr-undo"), "恢复到原清单", self)
+        act_restore.triggered.connect(lambda: self._restore_system_todo(widget))
+        menu.addAction(act_restore)
+
+        act_delete = QAction(self._menu_icon_from_svg_key("fi-rr-trash"), "移入回收站", self)
+        act_delete.triggered.connect(lambda: self._move_system_todo_to_trash(widget))
+        menu.addAction(act_delete)
+        menu.exec_(widget.mapToGlobal(pos))
+
+    def _show_trash_todo_context_menu(self, widget, pos):
+        menu = QMenu(self)
+        apply_popup_menu_appearance(menu)
+
+        act_restore = QAction(self._menu_icon_from_svg_key("fi-rr-undo"), "恢复", self)
+        act_restore.triggered.connect(lambda: self._restore_system_todo(widget))
+        menu.addAction(act_restore)
+
+        act_delete = QAction(self._menu_icon_from_svg_key("fi-rr-cross"), "永久删除", self)
+        act_delete.triggered.connect(lambda: self._permanently_delete_todo(widget))
+        menu.addAction(act_delete)
+        menu.exec_(widget.mapToGlobal(pos))
+
+    def _archive_completed_todos(self, list_name=None):
+        target_list = list_name or self.current_list_name
+        if target_list not in self.todo_lists or TODOParser.is_system_list_name(target_list):
+            return
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        archived_count = parser.archive_completed_in_list(target_list)
+        if archived_count <= 0:
+            show_theme_information(self.window(), "提示", "当前清单没有已完成项可归档。")
+            return
+        self.todo_lists = parser.lists
+        self._setCurrentList(target_list, sync_before_switch=False)
+        self._save_lists_to_disk()
+
+    def _archive_single_todo(self, widget):
+        if widget not in self._todoWidgets() or not widget.check_box.isChecked():
+            return
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        moved = parser.move_todo_to_system_list(widget.todo_id, TODOParser.SYSTEM_ARCHIVE_LIST)
+        if moved is None:
+            return
+        self.todo_lists = parser.lists
+        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._save_lists_to_disk()
+
+    def _restore_system_todo(self, widget):
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        restored = parser.restore_todo_from_system_list(widget.todo_id)
+        if restored is None:
+            return
+        target_list, _ = restored
+        self.todo_lists = parser.lists
+        self._setCurrentList(target_list, sync_before_switch=False)
+        self._save_lists_to_disk()
+
+    def _move_system_todo_to_trash(self, widget):
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        moved = parser.move_todo_to_system_list(widget.todo_id, TODOParser.SYSTEM_TRASH_LIST)
+        if moved is None:
+            return
+        self.todo_lists = parser.lists
+        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._save_lists_to_disk()
+
+    def _permanently_delete_todo(self, widget):
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        deleted = parser.permanently_delete_todo(widget.todo_id)
+        if deleted is None:
+            return
+        self.todo_lists = parser.lists
+        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._save_lists_to_disk()
+
     def _reorder_todo_lists(self, ordered_keys):
-        self.todo_lists = {k: self.todo_lists[k] for k in ordered_keys}
+        reordered = {k: self.todo_lists[k] for k in ordered_keys if k in self.todo_lists}
+        for system_name in TODOParser.SYSTEM_LIST_NAMES:
+            if system_name in self.todo_lists:
+                reordered[system_name] = self.todo_lists[system_name]
+        self.todo_lists = reordered
 
     def _move_list_to_edge(self, list_name, to_top):
         self._syncCurrentListFromUI()
-        keys = list(self.todo_lists.keys())
+        keys = self._visibleListNames()
         if list_name not in keys:
             return
         i = keys.index(list_name)
@@ -1628,7 +1867,7 @@ class TODOListPanel(ThemedOptionCardPlane):
 
     def _move_list_by_delta(self, list_name, delta):
         self._syncCurrentListFromUI()
-        keys = list(self.todo_lists.keys())
+        keys = self._visibleListNames()
         if list_name not in keys:
             return
         i = keys.index(list_name)
@@ -1655,7 +1894,7 @@ class TODOListPanel(ThemedOptionCardPlane):
 
         base_name = new_name
         suffix = 2
-        while new_name in self.todo_lists:
+        while new_name in self.todo_lists or TODOParser.is_system_list_name(new_name):
             new_name = f"{base_name}{suffix}"
             suffix += 1
 
@@ -1676,15 +1915,22 @@ class TODOListPanel(ThemedOptionCardPlane):
     def _clear_list_contents(self, list_name):
         if list_name not in self.todo_lists:
             return
-        self._syncCurrentListFromUI()
-        self.todo_lists[list_name] = []
+        if TODOParser.is_system_list_name(list_name):
+            return
+        self._syncCurrentListFromUI(save_to_disk=False)
+        parser = ensure_todo_parser()
+        todo_ids = [todo.get("id") for todo in parser.lists.get(list_name, []) if isinstance(todo, dict)]
+        for todo_id in todo_ids:
+            parser.move_todo_to_system_list(todo_id, TODOParser.SYSTEM_TRASH_LIST)
+        self.todo_lists = parser.lists
         if self.current_list_name == list_name:
-            self._setCurrentList(list_name, sync_before_switch=False)
+            self._setCurrentList(list_name, sync_before_switch=False, save_to_disk=False)
+        self._save_lists_to_disk()
 
     def _delete_list_from_context(self, list_name):
         if list_name not in self.todo_lists:
             return
-        if len(self.todo_lists) <= 1:
+        if len(self._visibleListNames()) <= 1:
             show_theme_information(self.window(), "提示", "至少保留一个清单。")
             return
 
@@ -1697,18 +1943,26 @@ class TODOListPanel(ThemedOptionCardPlane):
         if reply != QMessageBox.Yes:
             return
 
-        self._syncCurrentListFromUI()
-        keys = list(self.todo_lists.keys())
+        self._syncCurrentListFromUI(save_to_disk=False)
+        parser = ensure_todo_parser()
+        todo_ids = [todo.get("id") for todo in parser.lists.get(list_name, []) if isinstance(todo, dict)]
+        for todo_id in todo_ids:
+            parser.move_todo_to_system_list(todo_id, TODOParser.SYSTEM_TRASH_LIST)
+        keys = self._visibleListNames()
         idx = keys.index(list_name)
-        del self.todo_lists[list_name]
+        if list_name in parser.lists:
+            del parser.lists[list_name]
+        self.todo_lists = parser.lists
 
         if self.current_list_name == list_name:
-            if idx >= len(self.todo_lists):
-                idx = len(self.todo_lists) - 1
-            self.current_list_name = list(self.todo_lists.keys())[max(0, idx)]
+            visible_lists = self._visibleListNames()
+            if idx >= len(visible_lists):
+                idx = len(visible_lists) - 1
+            self.current_list_name = visible_lists[max(0, idx)]
 
         self._rebuildListButtons()
-        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._setCurrentList(self.current_list_name, sync_before_switch=False, save_to_disk=False)
+        self._save_lists_to_disk()
 
     def _onCreateListClicked(self):
         list_name, ok = show_theme_text_input(self.window(), "新建清单", "请输入清单名称：", "")
@@ -1716,12 +1970,12 @@ class TODOListPanel(ThemedOptionCardPlane):
             return
 
         list_name = list_name.strip()
-        if list_name == "":
+        if list_name == "" or TODOParser.is_system_list_name(list_name):
             return
 
         base_name = list_name
         suffix = 2
-        while list_name in self.todo_lists:
+        while list_name in self.todo_lists or TODOParser.is_system_list_name(list_name):
             list_name = f"{base_name}{suffix}"
             suffix += 1
 
@@ -1749,21 +2003,29 @@ class TODOListPanel(ThemedOptionCardPlane):
                             completed_rank = todo.get("completed_rank", None)
                             normalized_lists[name].append(
                                 {
+                                    "id": str(todo.get("id", "")).strip() or TODOParser.generate_todo_id(),
                                     "text": str(todo.get("text", "")),
                                     "done": bool(todo.get("done", False)),
                                     "reminder": todo.get("reminder", None),
                                     "order_key": int(order_key),
                                     "completed_rank": int(completed_rank) if isinstance(completed_rank, (int, float)) else None,
+                                    "origin_list": todo.get("origin_list", None),
+                                    "deleted_at": todo.get("deleted_at", None),
+                                    "archived_at": todo.get("archived_at", None),
                                 }
                             )
                         else:
                             normalized_lists[name].append(
                                 {
+                                    "id": TODOParser.generate_todo_id(),
                                     "text": str(todo),
                                     "done": False,
                                     "reminder": None,
                                     "order_key": fallback_order_key,
                                     "completed_rank": None,
+                                    "origin_list": None,
+                                    "deleted_at": None,
+                                    "archived_at": None,
                                 }
                             )
                         fallback_order_key -= 1
@@ -1787,10 +2049,11 @@ class TODOListPanel(ThemedOptionCardPlane):
         if not normalized_lists:
             normalized_lists = {"默认清单": []}
 
-        self.todo_lists = normalized_lists
+        self.todo_lists = TODOParser._ensure_required_lists(normalized_lists)
         self.current_list_name = ""
         self._rebuildListButtons()
-        first_list_name = next(iter(self.todo_lists.keys()))
+        visible_lists = self._visibleListNames()
+        first_list_name = visible_lists[0] if visible_lists else TODOParser.DEFAULT_LIST_NAME
         self._setCurrentList(first_list_name, sync_before_switch=False, save_to_disk=False)
 
     def exportLists(self):
@@ -2827,8 +3090,10 @@ class CalendarPanel(ThemedOptionCardPlane):
 
     def _collect_reminder_todos(self):
         result = {}
-        parser = SiGlobal.todo_list.todos_parser
+        parser = ensure_todo_parser()
         for list_name, todos in parser.lists.items():
+            if TODOParser.is_system_list_name(list_name):
+                continue
             for i, todo in enumerate(todos):
                 if not isinstance(todo, dict):
                     continue
@@ -2842,6 +3107,7 @@ class CalendarPanel(ThemedOptionCardPlane):
                     if d not in result:
                         result[d] = []
                     result[d].append({
+                        "id": todo.get("id"),
                         "text": todo.get("text", ""),
                         "done": todo.get("done", False),
                         "reminder": reminder,
@@ -2895,12 +3161,11 @@ class CalendarPanel(ThemedOptionCardPlane):
         menu.exec_(global_pos)
 
     def _edit_calendar_todo(self, todo_data):
-        list_name = todo_data["list_name"]
-        index = todo_data["index"]
-        parser = SiGlobal.todo_list.todos_parser
-        if list_name not in parser.lists or index >= len(parser.lists[list_name]):
+        parser = ensure_todo_parser()
+        list_name, index, todo = parser.find_todo(todo_data.get("id"), include_system_lists=False)
+        if todo is None:
             return
-        current_text = parser.lists[list_name][index].get("text", "")
+        current_text = todo.get("text", "")
         new_text, ok = show_theme_text_input(self.window(), "编辑待办", "内容：", current_text)
         if not ok:
             return
@@ -2909,60 +3174,52 @@ class CalendarPanel(ThemedOptionCardPlane):
             return
         parser.lists[list_name][index]["text"] = new_text
         parser.write()
-        self.update_calendar()
-        self._refresh_main_panel()
+        refresh_todo_views_from_parser(reload_main_panel=True)
 
     def _edit_calendar_todo_reminder(self, todo_data):
-        list_name = todo_data["list_name"]
-        index = todo_data["index"]
-        parser = SiGlobal.todo_list.todos_parser
-        if list_name not in parser.lists or index >= len(parser.lists[list_name]):
+        parser = ensure_todo_parser()
+        list_name, index, todo = parser.find_todo(todo_data.get("id"), include_system_lists=False)
+        if todo is None:
             return
-        current_reminder = parser.lists[list_name][index].get("reminder")
+        current_reminder = todo.get("reminder")
         dlg = ReminderDialog(self.window(), current_reminder)
         if dlg.exec_() == QDialog.Accepted:
             reminder_data = dlg.get_reminder_data()
             parser.lists[list_name][index]["reminder"] = reminder_data
             parser.write()
-            self.update_calendar()
-            self._refresh_main_panel()
+            refresh_todo_views_from_parser(reload_main_panel=True)
 
     def _toggle_calendar_todo_done(self, todo_data):
-        list_name = todo_data["list_name"]
-        index = todo_data["index"]
-        parser = SiGlobal.todo_list.todos_parser
-        if list_name not in parser.lists or index >= len(parser.lists[list_name]):
+        parser = ensure_todo_parser()
+        list_name, index, todo = parser.find_todo(todo_data.get("id"), include_system_lists=False)
+        if todo is None:
             return
-        current_done = parser.lists[list_name][index].get("done", False)
+        current_done = todo.get("done", False)
         parser.lists[list_name][index]["done"] = not current_done
+        if parser.lists[list_name][index]["done"]:
+            parser.lists[list_name][index]["completed_rank"] = parser.next_completed_rank(list_name)
+        else:
+            parser.lists[list_name][index]["completed_rank"] = None
+            parser.lists[list_name][index]["order_key"] = parser.next_order_key(list_name)
         parser.write()
-        self.update_calendar()
-        self._refresh_main_panel()
+        refresh_todo_views_from_parser(reload_main_panel=True)
 
     def _delete_calendar_todo(self, todo_data):
-        list_name = todo_data["list_name"]
-        index = todo_data["index"]
-        parser = SiGlobal.todo_list.todos_parser
-        if list_name not in parser.lists or index >= len(parser.lists[list_name]):
+        parser = ensure_todo_parser()
+        list_name, index, todo = parser.find_todo(todo_data.get("id"), include_system_lists=False)
+        if todo is None:
             return
         reply = show_theme_question(
             self.window(), "删除待办",
             f"确定删除「{todo_data.get('text', '')}」吗？", default_no=True)
         if reply != QMessageBox.Yes:
             return
-        parser.lists[list_name].pop(index)
+        parser.move_todo_to_system_list(todo.get("id"), TODOParser.SYSTEM_TRASH_LIST)
         parser.write()
-        self.update_calendar()
-        self._refresh_main_panel()
+        refresh_todo_views_from_parser(reload_main_panel=True)
 
     def _refresh_main_panel(self):
-        main_window = SiGlobal.siui.windows.get("MAIN_WINDOW")
-        if main_window and hasattr(main_window, "todo_list_panel"):
-            panel = main_window.todo_list_panel
-            saved_list = panel.current_list_name
-            panel.loadLists(SiGlobal.todo_list.todos_parser.lists)
-            if saved_list in panel.todo_lists:
-                panel._setCurrentList(saved_list, sync_before_switch=False, save_to_disk=False)
+        refresh_todo_views_from_parser(reload_main_panel=True)
 
     def reloadStyleSheet(self):
         self.setThemeColor(SiGlobal.siui.colors["PANEL_THEME"])
@@ -3881,9 +4138,9 @@ class CalendarWindow(QMainWindow):
         super().mouseReleaseEvent(event)
 
 class ReminderNotificationWindow(QMainWindow):
-    def __init__(self, todo_widget, todo_text, time_str):
+    def __init__(self, todo_id, todo_text, time_str):
         super().__init__()
-        self.todo_widget = todo_widget
+        self.todo_id = str(todo_id)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(300, 110)
@@ -3945,21 +4202,25 @@ class ReminderNotificationWindow(QMainWindow):
             self.move(geom.width() - self.width() - 24, geom.height() - self.height() - 24)
 
     def _on_close(self):
-        if self.todo_widget:
-            self.todo_widget.setReminder(None)
-            if hasattr(self.todo_widget, "todo_panel"):
-                self.todo_widget.todo_panel._syncCurrentListFromUI(save_to_disk=True)
+        parser = ensure_todo_parser()
+        list_name, index, todo = parser.find_todo(self.todo_id, include_system_lists=False)
+        if todo is not None:
+            parser.lists[list_name][index]["reminder"] = None
+            parser.write()
+            refresh_todo_views_from_parser(reload_main_panel=True)
         self.close()
         self.deleteLater()
 
     def _on_delay(self):
-        if self.todo_widget:
-            rem = getattr(self.todo_widget, "reminder_data", {})
+        parser = ensure_todo_parser()
+        list_name, index, todo = parser.find_todo(self.todo_id, include_system_lists=False)
+        if todo is not None:
+            rem = dict(todo.get("reminder", {}) or {})
             if rem:
-                rem["timestamp"] += 1800 # Delay by 30 minutes
-                self.todo_widget.setReminder(rem)
-                if hasattr(self.todo_widget, "todo_panel"):
-                    self.todo_widget.todo_panel._syncCurrentListFromUI(save_to_disk=True)
+                rem["timestamp"] = int(rem.get("timestamp", 0)) + 1800
+                parser.lists[list_name][index]["reminder"] = rem
+                parser.write()
+                refresh_todo_views_from_parser(reload_main_panel=True)
         self.close()
         self.deleteLater()
 
@@ -4056,19 +4317,20 @@ class TODOApplication(QMainWindow):
         SiGlobal.siui.reloadAllWindowsStyleSheet()
 
         # 读取 todos.ini 清单数据
-        self.todo_list_panel.loadLists(SiGlobal.todo_list.todos_parser.lists)
+        self.todo_list_panel.loadLists(ensure_todo_parser().lists)
         self._syncMainWindowLayout()
         self._moveToStartupPosition()
         self.applyWindowOpacity()
 
-        # Reminder Timer
+        # Reminder Scheduler
         self.reminder_timer = QTimer(self)
+        self.reminder_timer.setSingleShot(True)
         self.reminder_timer.timeout.connect(self._check_reminders)
-        self.reminder_timer.start(10000) # Check every 10 seconds
         self.active_reminders = []
+        self.reminder_heap = []
+        self.rebuildReminderSchedule()
 
-    def _check_reminders(self):
-        # 过滤掉已经被删除的C++对象
+    def _activeReminderIds(self):
         valid_reminders = []
         for p in self.active_reminders:
             try:
@@ -4077,21 +4339,58 @@ class TODOApplication(QMainWindow):
             except RuntimeError:
                 pass
         self.active_reminders = valid_reminders
+        return {popup.todo_id for popup in self.active_reminders}
 
+    def rebuildReminderSchedule(self):
+        parser = ensure_todo_parser()
+        self.reminder_heap = []
+        for list_name, todos in parser.user_lists().items():
+            for todo in todos:
+                reminder = todo.get("reminder", None)
+                timestamp = reminder.get("timestamp", 0) if isinstance(reminder, dict) else 0
+                if todo.get("done", False) or not isinstance(timestamp, (int, float)) or int(timestamp) <= 0:
+                    continue
+                heapq.heappush(self.reminder_heap, (int(timestamp), str(todo.get("id", ""))))
+        self._scheduleNextReminderCheck()
+
+    def _scheduleNextReminderCheck(self):
+        self.reminder_timer.stop()
+        if not self.reminder_heap:
+            return
+
+        now_ms = int(datetime.now().timestamp() * 1000)
+        next_ts_ms = int(self.reminder_heap[0][0] * 1000)
+        delay = max(0, next_ts_ms - now_ms)
+        self.reminder_timer.start(min(delay, 24 * 60 * 60 * 1000))
+
+    def _check_reminders(self):
+        active_ids = self._activeReminderIds()
+        parser = ensure_todo_parser()
         now = int(datetime.now().timestamp())
-        for widget in self.todo_list_panel._todoWidgets():
-            rem = getattr(widget, "reminder_data", None)
-            if rem and not widget.check_box.isChecked():
-                ts = rem.get("timestamp", 0)
-                if 0 < ts <= now:
-                    # Clear it so it doesn't trigger again, or wait for user to close/delay
-                    # We'll just show the popup and the popup will handle clearing or delaying
-                    if not getattr(widget, "_popup_shown", False):
-                        widget._popup_shown = True
-                        t_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-                        popup = ReminderNotificationWindow(widget, widget.text_label.text(), t_str)
-                        popup.show()
-                        self.active_reminders.append(popup)
+        due_todos = []
+
+        while self.reminder_heap and self.reminder_heap[0][0] <= now:
+            ts, todo_id = heapq.heappop(self.reminder_heap)
+            list_name, index, todo = parser.find_todo(todo_id, include_system_lists=False)
+            if todo is None:
+                continue
+            reminder = todo.get("reminder", None)
+            current_ts = reminder.get("timestamp", 0) if isinstance(reminder, dict) else 0
+            if todo.get("done", False) or int(current_ts) != int(ts):
+                continue
+            if todo_id in active_ids:
+                continue
+            due_todos.append((todo_id, todo))
+            active_ids.add(todo_id)
+
+        for todo_id, todo in due_todos:
+            reminder = todo.get("reminder", None) or {}
+            t_str = datetime.fromtimestamp(int(reminder.get("timestamp", now))).strftime("%Y-%m-%d %H:%M")
+            popup = ReminderNotificationWindow(todo_id, todo.get("text", ""), t_str)
+            popup.show()
+            self.active_reminders.append(popup)
+
+        self._scheduleNextReminderCheck()
 
     def _createAppIcon(self):
         try:
@@ -4403,9 +4702,10 @@ class TODOApplication(QMainWindow):
 
         # 获取当前清单数据，并写入 todos.ini
         todo_lists = self.todo_list_panel.exportLists()
-        SiGlobal.todo_list.todos_parser.lists = todo_lists
-        SiGlobal.todo_list.todos_parser.todos = list(next(iter(todo_lists.values()))) if todo_lists else []
-        SiGlobal.todo_list.todos_parser.write()
+        parser = ensure_todo_parser()
+        parser.lists = parser._ensure_required_lists(todo_lists)
+        parser.todos = list(next(iter(parser.user_lists().values()), []))
+        parser.write()
 
         # 写入设置到 options.ini
         SiGlobal.todo_list.settings_parser.modify("HAS_CUSTOM_POSITION", True)

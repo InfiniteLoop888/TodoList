@@ -37,12 +37,9 @@ class ToolTipWindow(ABCAnimatedWidget):
         self.bg_label = siui.widgets.SiLabel(self)
         self.bg_label.move(self.margin, self.margin)
         self.bg_label.setFixedStyleSheet("border-radius: 6px")
-        # 避免在 Win 分层窗口上给顶层窗口直接加阴影，改为给内部背景层加阴影
-        shadow = QGraphicsDropShadowEffect(self.bg_label)
-        shadow.setColor(QColor(0, 0, 0, 128))
-        shadow.setOffset(0, 0)
-        shadow.setBlurRadius(int(self.shadow_size * 1.5))
-        self.bg_label.setGraphicsEffect(shadow)
+        # Win 上透明分层窗口配合阴影容易触发 UpdateLayeredWindowIndirect 报错，
+        # 这里保留留白，但不再给 tooltip 叠加阴影效果。
+        self.bg_label.setGraphicsEffect(None)
 
         # 文字标签的父对象，防止文字超出界限
         self.text_container = siui.widgets.SiLabel(self)

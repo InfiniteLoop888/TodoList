@@ -1,7 +1,10 @@
-from config_paths import mirror_user_ini_to_application_dir
+from config_paths import _default_options_ini_text, mirror_user_ini_to_application_dir
+from safe_io import atomic_write_text, backup_path_for, read_text_if_exists, restore_backup
 
 
 class SettingsParser:
+    DEFAULT_TEXT = _default_options_ini_text()
+
     def __init__(self, path):
         self.ini_path = path
         self.options = {}
@@ -12,20 +15,9 @@ class SettingsParser:
         """
         Load keys and values from .ini file
         """
-        ini_file = open(self.ini_path, encoding="utf-8")
-        options = {}
-
-        for line in ini_file.readlines():
-            line = line.strip()
-            if self._is_a_legal_line(line) is False:
-                continue
-
-            key, value = line.split("=")
-            key = key.strip()
-            value = value.strip()
-            options[key] = self._match_type(value)
-
-        # update the options dict
+        options = dict(self._parse_ini_text(self.DEFAULT_TEXT))
+        loaded = self._load_with_backup()
+        options.update(loaded)
         self.options.update(options)
 
     def modify(self, key, value):
@@ -40,12 +32,28 @@ class SettingsParser:
         """
         Write current options dict into .ini file
         """
-        ini_file = open(self.ini_path, "w", encoding="utf-8")
-        for key, value in self.options.items():
-            ini_file.write(f"{key} = {value}\n")
-
-        ini_file.close()
+        lines = [f"{key} = {value}\n" for key, value in self.options.items()]
+        atomic_write_text(self.ini_path, "".join(lines), encoding="utf-8", keep_backup=True)
         mirror_user_ini_to_application_dir(self.ini_path)
+
+    def _load_with_backup(self):
+        try:
+            return self._parse_primary_file(self.ini_path)
+        except (OSError, ValueError):
+            bak = backup_path_for(self.ini_path)
+            try:
+                options = self._parse_primary_file(str(bak))
+            except (OSError, ValueError):
+                return {}
+            restore_backup(self.ini_path)
+            return options
+
+    def _parse_primary_file(self, path: str):
+        text = read_text_if_exists(path, encoding="utf-8")
+        options, has_data, has_legal_line = self._parse_ini_text(text, with_meta=True)
+        if has_data and not has_legal_line:
+            raise ValueError(f"invalid ini file: {path}")
+        return options
 
     @staticmethod
     def _match_type(string: str):
@@ -88,3 +96,26 @@ class SettingsParser:
             return False
 
         return True
+
+    @classmethod
+    def _parse_ini_text(cls, text: str, with_meta: bool = False):
+        options = {}
+        has_data = False
+        has_legal_line = False
+
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line == "" or line.startswith("#") or line.startswith(";"):
+                continue
+
+            has_data = True
+            if cls._is_a_legal_line(line) is False:
+                continue
+
+            key, value = line.split("=")
+            options[key.strip()] = cls._match_type(value.strip())
+            has_legal_line = True
+
+        if with_meta:
+            return options, has_data, has_legal_line
+        return options
