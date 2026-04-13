@@ -47,7 +47,7 @@ from PyQt5.QtWidgets import (
 )
 from config_paths import ensure_user_ini_files
 from settings_parser import SettingsParser
-from windows_startup import is_startup_enabled, set_startup_enabled, startup_supported
+from windows_startup import get_startup_status, is_startup_enabled, set_startup_enabled, startup_supported
 from todos_parser import TODOParser
 
 from siui.components.widgets import (
@@ -102,19 +102,22 @@ def lock_position(state):
     SiGlobal.todo_list.position_locked = state
 
 
+def apply_window_opacity_to_all(enabled=None):
+    for key in ("MAIN_WINDOW", "SETTINGS_WINDOW", "CALENDAR_WINDOW"):
+        window = SiGlobal.siui.windows.get(key)
+        if window is not None and hasattr(window, "applyWindowOpacity"):
+            window.applyWindowOpacity(enabled=enabled)
+
+
 def set_translucent_mode(state):
     SiGlobal.todo_list.settings_parser.modify("TRANSLUCENT_MODE", bool(state))
-    main_window = SiGlobal.siui.windows.get("MAIN_WINDOW")
-    if main_window is not None:
-        main_window.applyWindowOpacity(enabled=bool(state))
+    apply_window_opacity_to_all(enabled=bool(state))
 
 
 def set_translucent_opacity(opacity_percent):
     percent = max(10, min(95, int(opacity_percent)))
     SiGlobal.todo_list.settings_parser.modify("TRANSLUCENT_OPACITY", percent)
-    main_window = SiGlobal.siui.windows.get("MAIN_WINDOW")
-    if main_window is not None:
-        main_window.applyWindowOpacity()
+    apply_window_opacity_to_all()
 
 
 # 主题颜色
@@ -396,6 +399,14 @@ def themed_icon_from_svg_key(icon_key, menu_left_pad=0):
     renderer.render(painter, QRectF(float(pad), 0.0, float(icon_w), float(icon_h)))
     painter.end()
     return QIcon(pixmap)
+
+
+def settings_icon_svg_data():
+    for key in ("fi-rr-settings-sliders", "fi-rr-settings", "fi-rr-cog", "fi-rr-menu-burger"):
+        svg_data = SiGlobal.siui.icons.get(key)
+        if svg_data:
+            return svg_data
+    return None
 
 
 class SingleSettingOption(SiDenseVContainer):
@@ -784,7 +795,9 @@ class AppHeaderPanel(SiLabel):
                                            SiGlobal.siui.colors["TOGGLE_BUTTON_ON_BG"])
 
         # svg 图标
-        self.settings_button.attachment().load(SiGlobal.siui.icons["fi-rr-menu-burger"])
+        settings_svg = settings_icon_svg_data()
+        if settings_svg is not None:
+            self.settings_button.attachment().load(settings_svg)
         self.calendar_button.attachment().load(SiGlobal.siui.icons.get("fi-rr-calendar", SiGlobal.siui.icons["fi-rr-menu-burger"]))
         self.icon.load('<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" id="Layer_1" '
                        'data-name="Layer 1" viewBox="0 0 24 24" width="512" height="512"><path d="M0,8v-1C0,4.243,'
@@ -2054,6 +2067,8 @@ class TODOListPanel(ThemedOptionCardPlane):
         super().showEvent(a0)
         self.updateTODOAmount()
         self.setForceUseAnimations(True)
+        # 待办面板会随主窗口布局同步位置，关闭位移动画可避免重排时出现拖尾。
+        self.setInstantMove(True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3096,19 +3111,27 @@ class SettingsPanel(ThemedOptionCardPlane):
         self.todo_font_option = SingleSettingOption(self)
         self.todo_font_option.setTitle("字号", "像素值（8–24）")
 
-        self.todo_font_px_input = QLineEdit(self)
-        self.todo_font_px_input.setFixedWidth(56)
-        self.todo_font_px_input.setText(str(todo_item_font_px()))
-        self.todo_font_px_input.editingFinished.connect(self._onTodoFontPxEditingFinished)
+        self.todo_font_slider = QSlider(Qt.Horizontal, self)
+        self.todo_font_slider.setRange(8, 24)
+        self.todo_font_slider.setFixedWidth(150)
+        self.todo_font_slider.setValue(todo_item_font_px())
+        self.todo_font_slider.valueChanged.connect(self._onTodoFontSliderValueChanged)
 
-        self.todo_font_option.addWidget(self.todo_font_px_input)
+        self.todo_font_value = SiLabel(self)
+        self.todo_font_value.setFont(SiGlobal.siui.fonts["S_NORMAL"])
+        self.todo_font_value.setAutoAdjustSize(True)
+        self.todo_font_value.setText(f"{todo_item_font_px()}px")
+
+        self.todo_font_option.addWidget(self.todo_font_slider)
+        self.todo_font_option.addWidget(self.todo_font_value)
         self.todo_font_option.addPlaceholder(16)
 
         self.settings_footer_credits = SiLabel(self)
         self.settings_footer_credits.setTextFormat(Qt.RichText)
         self.settings_footer_credits.setOpenExternalLinks(True)
         self.settings_footer_credits.setAlignment(Qt.AlignCenter)
-        self.settings_footer_credits.setAutoAdjustSize(True)
+        self.settings_footer_credits.setAutoAdjustSize(False)
+        self.settings_footer_credits.setFixedHeight(22)
         self.settings_footer_credits.setHint("")
 
         # 添加到body
@@ -3136,21 +3159,7 @@ class SettingsPanel(ThemedOptionCardPlane):
             'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
         )
         self.translucent_opacity_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
-        self.todo_font_px_input.setStyleSheet(
-            """
-            QLineEdit {{
-                border: 1px solid {border};
-                border-radius: 6px;
-                padding: 4px 8px;
-                background-color: {bg};
-                color: {text};
-            }}
-            """.format(
-                border=SiGlobal.siui.colors["BORDER_COLOR"],
-                bg=SiGlobal.siui.colors["BACKGROUND_DARK_COLOR"],
-                text=SiGlobal.siui.colors["TEXT_B"],
-            )
-        )
+        self.todo_font_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.translucent_opacity_slider.setStyleSheet(
             """
             QSlider::groove:horizontal {{
@@ -3177,31 +3186,385 @@ class SettingsPanel(ThemedOptionCardPlane):
                 text=SiGlobal.siui.colors["TEXT_B"],
             )
         )
+        self.todo_font_slider.setStyleSheet(self.translucent_opacity_slider.styleSheet())
 
     def _onTranslucentOpacityChanged(self, value):
         self.translucent_opacity_value.setText(f"{value}%")
         set_translucent_opacity(value)
 
-    def _onTodoFontPxEditingFinished(self):
-        text = self.todo_font_px_input.text().strip()
-        try:
-            px = int(text)
-        except ValueError:
-            self.todo_font_px_input.setText(str(todo_item_font_px()))
-            return
-        px = max(8, min(24, px))
-        self.todo_font_px_input.setText(str(px))
+    def _onTodoFontSliderValueChanged(self, value):
+        px = max(8, min(24, int(value)))
+        self.todo_font_value.setText(f"{px}px")
         SiGlobal.todo_list.settings_parser.modify("TODO_ITEM_FONT_PX", px)
         SiGlobal.todo_list.settings_parser.write()
         apply_todo_item_font_setting()
 
     def showEvent(self, a0):
         super().showEvent(a0)
-        self.setForceUseAnimations(True)
         if self.button_startup is not None:
             self.button_startup.blockSignals(True)
             self.button_startup.setChecked(is_startup_enabled())
             self.button_startup.blockSignals(False)
+
+
+class SettingsWindow(QMainWindow):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinimizeButtonHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setMouseTracking(True)
+        self.setWindowIcon(self._createSettingsIcon())
+
+        self.padding = 32
+        self.container = QWidget(self)
+        self.container.setMouseTracking(True)
+
+        self.settings_panel = SettingsPanel(self.container)
+        self.settings_panel.setForceUseAnimations(False)
+        self.settings_panel.setInstantMove(True)
+        self.settings_panel.setInstantResize(True)
+        self.settings_panel.setMouseTracking(True)
+        self.settings_panel.setCursor(Qt.ArrowCursor)
+
+        self.maximize_btn = SiSimpleButton(self.settings_panel)
+        self.maximize_btn.resize(32, 32)
+        self.maximize_btn.setHint("全屏")
+        self.maximize_btn.clicked.connect(self._toggle_maximize)
+
+        self.minimize_btn = SiSimpleButton(self.settings_panel)
+        self.minimize_btn.resize(32, 32)
+        self.minimize_btn.setHint("最小化")
+        self.minimize_btn.clicked.connect(self.showMinimized)
+
+        self.close_btn = SiSimpleButton(self.settings_panel)
+        self.close_btn.resize(32, 32)
+        self.close_btn.setHint("关闭")
+        self.close_btn.clicked.connect(self.hide)
+
+        header = self.settings_panel.header()
+        header.addWidget(self.close_btn, "right")
+        header.addWidget(self.maximize_btn, "right")
+        header.addWidget(self.minimize_btn, "right")
+
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(0, 0)
+        shadow.setBlurRadius(32)
+        self.settings_panel.setGraphicsEffect(shadow)
+
+        self._dragging = False
+        self._resizing = False
+        self._resize_dir = ""
+        self.anchor = QPoint()
+        self._position_initialized = False
+        self._is_maximized = False
+
+        panel_w = 520
+        self.settings_panel.resize(panel_w, self.settings_panel.height())
+        self.settings_panel.body().adjustSize()
+        self.settings_panel.adjustSize()
+        panel_h = self.settings_panel.height()
+        self.resize(panel_w + 2 * self.padding, panel_h + 2 * self.padding)
+        self.setMinimumSize(440 + 2 * self.padding, panel_h + 2 * self.padding)
+        self._apply_saved_settings_geometry()
+
+        SiGlobal.siui.windows["SETTINGS_WINDOW"] = self
+        self.applyWindowOpacity()
+        self.reloadStyleSheet()
+
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._persist_settings_geometry)
+
+    def _createSettingsIcon(self):
+        try:
+            svg_data = settings_icon_svg_data()
+            if svg_data is None:
+                svg_data = SiGlobal.siui.icons.get("fi-rr-list-check")
+            renderer = QSvgRenderer(QByteArray(svg_data))
+            if not renderer.isValid():
+                return QIcon()
+            size = QSize(64, 64)
+            pixmap = QPixmap(size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            return QIcon(pixmap)
+        except Exception:
+            return QIcon()
+
+    def _settings_rect_on_any_screen(self, rect):
+        app = QApplication.instance()
+        if app is None:
+            return False
+        for screen in app.screens():
+            if screen.availableGeometry().intersects(rect):
+                return True
+        return False
+
+    def _moveToInitialPosition(self):
+        main_window = SiGlobal.siui.windows.get("MAIN_WINDOW")
+        screen = None
+        if main_window is not None:
+            center = main_window.frameGeometry().center()
+            screen = QApplication.screenAt(center)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        geo = screen.availableGeometry()
+        x = geo.center().x() - self.width() // 2
+        y = geo.center().y() - self.height() // 2
+        x = max(geo.left() + 8, min(x, geo.right() - self.width() - 8))
+        y = max(geo.top() + 8, min(y, geo.bottom() - self.height() - 8))
+        self.move(x, y)
+        self._position_initialized = True
+
+    def _apply_saved_settings_geometry(self):
+        opts = SiGlobal.todo_list.settings_parser.options
+        x = opts.get("SETTINGS_X")
+        y = opts.get("SETTINGS_Y")
+        w = opts.get("SETTINGS_WIDTH")
+        h = opts.get("SETTINGS_HEIGHT")
+        maxed = bool(opts.get("SETTINGS_MAXIMIZED", False))
+
+        min_w = self.minimumWidth()
+        min_h = self.minimumHeight()
+        if (
+            isinstance(x, int)
+            and isinstance(y, int)
+            and isinstance(w, int)
+            and isinstance(h, int)
+            and w >= min_w
+            and h >= min_h
+        ):
+            rect = QRect(x, y, w, h)
+            if self._settings_rect_on_any_screen(rect):
+                self.setGeometry(rect)
+                self._position_initialized = True
+        if not self._position_initialized:
+            self._moveToInitialPosition()
+
+        if maxed:
+            self._is_maximized = True
+            self.padding = 0
+            self.settings_panel.setGraphicsEffect(None)
+            self.maximize_btn.setHint("恢复")
+            self.maximize_btn.attachment().load(
+                SiGlobal.siui.icons.get("fi-rr-compress", SiGlobal.siui.icons.get("fi-rr-picture"))
+            )
+            self.showMaximized()
+
+    def _persist_settings_geometry(self):
+        parser = SiGlobal.todo_list.settings_parser
+        if getattr(self, "_is_maximized", False):
+            g = self.normalGeometry()
+            parser.modify("SETTINGS_MAXIMIZED", True)
+        else:
+            g = self.geometry()
+            parser.modify("SETTINGS_MAXIMIZED", False)
+        parser.modify("SETTINGS_X", g.x())
+        parser.modify("SETTINGS_Y", g.y())
+        parser.modify("SETTINGS_WIDTH", g.width())
+        parser.modify("SETTINGS_HEIGHT", g.height())
+        parser.write()
+
+    def _syncHeaderButton(self, visible):
+        main_window = SiGlobal.siui.windows.get("MAIN_WINDOW")
+        if main_window is None or not hasattr(main_window, "header_panel"):
+            return
+        btn = getattr(main_window.header_panel, "settings_button", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        btn.setChecked(bool(visible))
+        btn.blockSignals(False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w, h = event.size().width(), event.size().height()
+        self.container.resize(w, h)
+        self.settings_panel.setGeometry(self.padding, self.padding, w - 2 * self.padding, h - 2 * self.padding)
+
+    def reloadStyleSheet(self):
+        self.close_btn.attachment().load(SiGlobal.siui.icons["fi-rr-cross"])
+        self.minimize_btn.attachment().load(
+            SiGlobal.siui.icons.get("fi-rr-minus", SiGlobal.siui.icons.get("fi-rr-cross-small", SiGlobal.siui.icons["fi-rr-cross"]))
+        )
+        if getattr(self, "_is_maximized", False):
+            self.maximize_btn.attachment().load(SiGlobal.siui.icons.get("fi-rr-compress", SiGlobal.siui.icons.get("fi-rr-picture")))
+        else:
+            self.maximize_btn.attachment().load(SiGlobal.siui.icons.get("fi-rr-expand", SiGlobal.siui.icons.get("fi-rr-picture")))
+
+    def applyWindowOpacity(self, enabled=None):
+        options = SiGlobal.todo_list.settings_parser.options
+        is_translucent = bool(options.get("TRANSLUCENT_MODE", False)) if enabled is None else bool(enabled)
+        opacity_percent = int(options.get("TRANSLUCENT_OPACITY", 70))
+        opacity_percent = max(10, min(95, opacity_percent))
+        translucent_opacity = opacity_percent / 100.0
+        self.setWindowOpacity(translucent_opacity if is_translucent else 1.0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._position_initialized:
+            self._moveToInitialPosition()
+        self._syncHeaderButton(True)
+        self.applyWindowOpacity()
+
+    def hideEvent(self, event):
+        self._persist_settings_geometry()
+        self._syncHeaderButton(False)
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self._persist_settings_geometry()
+        super().closeEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange and self.isMinimized():
+            self._persist_settings_geometry()
+            self._syncHeaderButton(False)
+
+    def _toggle_maximize(self):
+        if getattr(self, "_is_maximized", False):
+            self._is_maximized = False
+            self.padding = 32
+            shadow = QGraphicsDropShadowEffect()
+            shadow.setColor(QColor(0, 0, 0, 80))
+            shadow.setOffset(0, 0)
+            shadow.setBlurRadius(32)
+            self.settings_panel.setGraphicsEffect(shadow)
+            self.showNormal()
+            self.maximize_btn.setHint("全屏")
+            self.maximize_btn.attachment().load(
+                SiGlobal.siui.icons.get("fi-rr-expand", SiGlobal.siui.icons.get("fi-rr-picture"))
+            )
+        else:
+            self._is_maximized = True
+            self.padding = 0
+            self.settings_panel.setGraphicsEffect(None)
+            self.showMaximized()
+            self.maximize_btn.setHint("恢复")
+            self.maximize_btn.attachment().load(
+                SiGlobal.siui.icons.get("fi-rr-compress", SiGlobal.siui.icons.get("fi-rr-picture"))
+            )
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() == Qt.LeftButton:
+            pos = event.pos()
+            if getattr(self, "_is_maximized", False):
+                return
+            panel_x = self.padding
+            panel_y = self.padding
+            panel_r = self.width() - self.padding
+            panel_b = self.height() - self.padding
+
+            edge = 6
+            self._resize_dir = ""
+            if panel_x - edge <= pos.x() <= panel_r + edge and panel_y - edge <= pos.y() <= panel_b + edge:
+                if abs(pos.x() - panel_x) <= edge:
+                    self._resize_dir += "L"
+                elif abs(pos.x() - panel_r) <= edge:
+                    self._resize_dir += "R"
+
+                if abs(pos.y() - panel_y) <= edge:
+                    self._resize_dir += "T"
+                elif abs(pos.y() - panel_b) <= edge:
+                    self._resize_dir += "B"
+
+            if self._resize_dir != "":
+                self._resizing = True
+                self._drag_start_pos = event.globalPos()
+                self._drag_start_geometry = self.geometry()
+                event.accept()
+            elif panel_x <= pos.x() <= panel_r and panel_y <= pos.y() <= panel_y + self.settings_panel.header().height():
+                self._dragging = True
+                self.anchor = event.pos()
+                event.accept()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if not hasattr(self, "_resizing"):
+            self._resizing = False
+        if not hasattr(self, "_dragging"):
+            self._dragging = False
+
+        if not (event.buttons() & Qt.LeftButton):
+            pos = event.pos()
+            if getattr(self, "_is_maximized", False):
+                self.setCursor(Qt.ArrowCursor)
+                return
+            panel_x = self.padding
+            panel_y = self.padding
+            panel_r = self.width() - self.padding
+            panel_b = self.height() - self.padding
+
+            edge = 6
+            direction = ""
+            if panel_x - edge <= pos.x() <= panel_r + edge and panel_y - edge <= pos.y() <= panel_b + edge:
+                if abs(pos.x() - panel_x) <= edge:
+                    direction += "L"
+                elif abs(pos.x() - panel_r) <= edge:
+                    direction += "R"
+                if abs(pos.y() - panel_y) <= edge:
+                    direction += "T"
+                elif abs(pos.y() - panel_b) <= edge:
+                    direction += "B"
+
+            if direction in ("LT", "RB"):
+                self.setCursor(Qt.SizeFDiagCursor)
+            elif direction in ("RT", "LB"):
+                self.setCursor(Qt.SizeBDiagCursor)
+            elif direction in ("L", "R"):
+                self.setCursor(Qt.SizeHorCursor)
+            elif direction in ("T", "B"):
+                self.setCursor(Qt.SizeVerCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+            return
+
+        if self._resizing:
+            delta = event.globalPos() - self._drag_start_pos
+            geom = self._drag_start_geometry
+            x, y, w, h = geom.x(), geom.y(), geom.width(), geom.height()
+
+            if "L" in self._resize_dir:
+                w -= delta.x()
+                x += delta.x()
+            elif "R" in self._resize_dir:
+                w += delta.x()
+
+            if "T" in self._resize_dir:
+                h -= delta.y()
+                y += delta.y()
+            elif "B" in self._resize_dir:
+                h += delta.y()
+
+            min_w = self.minimumWidth()
+            min_h = self.minimumHeight()
+            if w < min_w:
+                if "L" in self._resize_dir:
+                    x -= (min_w - w)
+                w = min_w
+            if h < min_h:
+                if "T" in self._resize_dir:
+                    y -= (min_h - h)
+                h = min_h
+
+            self.setGeometry(x, y, w, h)
+        elif self._dragging:
+            new_pos = event.pos() - self.anchor + self.frameGeometry().topLeft()
+            self.move(new_pos)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        self._resizing = False
+        super().mouseReleaseEvent(event)
 
 
 class CalendarWindow(QMainWindow):
@@ -3648,14 +4011,9 @@ class TODOApplication(QMainWindow):
         self.header_panel.setFixedWidth(self.container_v.width() - 2 * self.padding)
         self.header_panel.setFixedHeight(48 + 12)
 
-        # 设置面板
-        self.settings_panel = SettingsPanel(self)
-        self.settings_panel.setFixedWidth(self.container_v.width() - 2 * self.padding)
-        self.settings_panel.adjustSize()
-
-        self.settings_panel_placeholder = SiLabel(self)
-        self.settings_panel_placeholder.setFixedHeight(12)
-        self._onSettingsButtonToggled(False)
+        # 设置窗口（独立窗口，保持与主界面一致的卡片风格）
+        self.settings_window = SettingsWindow()
+        self.settings_panel = self.settings_window.settings_panel
 
         # 待办列表面板（标题为当前清单名）
         self.todo_list_panel = TODOListPanel(self)
@@ -3668,17 +4026,15 @@ class TODOApplication(QMainWindow):
 
         # <- 添加到垂直容器
         self.container_v.addWidget(self.header_panel)
-        self.container_v.addWidget(self.settings_panel)
-        self.container_v.addWidget(self.settings_panel_placeholder)
         self.container_v.addWidget(self.todo_list_panel)
         self.container_v.addWidget(self.todo_list_panel_placeholder)
+        self._syncMainWindowLayout()
 
         # 绑定界面信号
         self.header_panel.unfold_button.toggled.connect(self._onShowTODOButtonToggled)
         self.header_panel.settings_button.toggled.connect(self._onSettingsButtonToggled)
         self.header_panel.calendar_button.clicked.connect(self._onCalendarButtonClicked)
 
-        self.settings_panel.resized.connect(self._onTODOWindowResized)
         self.todo_list_panel.resized.connect(self._onTODOWindowResized)
         self.settings_panel.button_use_dark_mode.toggled.connect(lambda _: self._applyTrayMenuStyle())
         if self.settings_panel.button_startup is not None:
@@ -3701,6 +4057,7 @@ class TODOApplication(QMainWindow):
 
         # 读取 todos.ini 清单数据
         self.todo_list_panel.loadLists(SiGlobal.todo_list.todos_parser.lists)
+        self._syncMainWindowLayout()
         self._moveToStartupPosition()
         self.applyWindowOpacity()
 
@@ -3806,26 +4163,47 @@ class TODOApplication(QMainWindow):
         apply_popup_menu_appearance(self.tray_menu)
 
     def _refreshTrayStartupAction(self):
-        if getattr(self, "action_startup", None) is None:
-            return
-        self.action_startup.blockSignals(True)
-        self.action_startup.setChecked(is_startup_enabled())
-        self.action_startup.blockSignals(False)
+        self._syncStartupControls()
 
-    def _onStartupToggledFromTray(self, checked):
-        set_startup_enabled(bool(checked))
-        sp = getattr(self.settings_panel, "button_startup", None)
-        if sp is not None:
-            sp.blockSignals(True)
-            sp.setChecked(bool(checked))
-            sp.blockSignals(False)
-
-    def _onStartupToggledFromSettings(self, enabled):
-        set_startup_enabled(bool(enabled))
+    def _setStartupControlsChecked(self, enabled):
         if getattr(self, "action_startup", None) is not None:
             self.action_startup.blockSignals(True)
             self.action_startup.setChecked(bool(enabled))
             self.action_startup.blockSignals(False)
+        sp = getattr(self.settings_panel, "button_startup", None)
+        if sp is not None:
+            sp.blockSignals(True)
+            sp.setChecked(bool(enabled))
+            sp.blockSignals(False)
+
+    def _syncStartupControls(self, status=None):
+        if status is None:
+            status = get_startup_status()
+        self._setStartupControlsChecked(status.enabled)
+        return status
+
+    def _applyStartupToggle(self, enabled):
+        status = set_startup_enabled(bool(enabled))
+        self._syncStartupControls(status)
+        if status.error:
+            QMessageBox.warning(
+                self,
+                "开机自启动设置失败",
+                "无法更新开机自启动状态。\n\n系统返回信息：{}".format(status.error),
+            )
+            return
+        if status.enabled != bool(enabled):
+            QMessageBox.warning(
+                self,
+                "开机自启动状态未更新",
+                "注册表中的启动命令与当前程序不一致，已按真实状态刷新开关。",
+            )
+
+    def _onStartupToggledFromTray(self, checked):
+        self._applyStartupToggle(checked)
+
+    def _onStartupToggledFromSettings(self, enabled):
+        self._applyStartupToggle(enabled)
 
     def _showFromTray(self):
         self.showNormal()
@@ -3879,12 +4257,28 @@ class TODOApplication(QMainWindow):
 
 
     def adjustSize(self):
-        h = (self.header_panel.height() + 12 +
-             self.settings_panel.height() + 12 +
-             self.todo_list_panel.height() +
-             2 * self.padding)
-        self.resize(self.width(), h)
-        self.container_v.adjustSize()
+        self._syncMainWindowLayout()
+
+    def _stacked_panels_height(self):
+        todo_panel_height = self.todo_list_panel.height() if hasattr(self, "todo_list_panel") else 0
+        todo_placeholder_height = (
+            self.todo_list_panel_placeholder.height()
+            if hasattr(self, "todo_list_panel_placeholder")
+            else 0
+        )
+        return (
+            self.header_panel.height()
+            + todo_panel_height
+            + todo_placeholder_height
+        )
+
+    def _syncMainWindowLayout(self):
+        if not hasattr(self, "container_v"):
+            return
+        stacked_height = self._stacked_panels_height()
+        self.container_v.resize(self.container_v.width(), stacked_height)
+        self.container_v.adjustWidgetsGeometry()
+        self.resize(self.width(), stacked_height + 2 * self.padding)
 
     def _apply_container_width(self, container_width):
         container_width = max(self.min_container_width, int(container_width))
@@ -3892,13 +4286,7 @@ class TODOApplication(QMainWindow):
 
         self.container_v.setFixedWidth(container_width)
         self.header_panel.setFixedWidth(panel_width)
-        self.settings_panel.setFixedWidth(panel_width)
         self.todo_list_panel.setFixedWidth(panel_width)
-
-        if self.header_panel.settings_button.isChecked():
-            self.settings_panel.adjustSize()
-        else:
-            self.settings_panel.resize(panel_width, 0)
 
         if self.header_panel.unfold_button.isChecked():
             self.todo_list_panel.adjustSize()
@@ -3919,10 +4307,10 @@ class TODOApplication(QMainWindow):
 
     def showEvent(self, a0):
         super().showEvent(a0)
+        self._syncMainWindowLayout()
 
     def _onTODOWindowResized(self, size):
-        w, h = size
-        self.adjustSize()
+        self._syncMainWindowLayout()
 
     def _onShowTODOButtonToggled(self, state):
         if state is True:
@@ -3933,14 +4321,19 @@ class TODOApplication(QMainWindow):
             self.todo_list_panel_placeholder.setFixedHeight(0)
             self.todo_list_panel.resize(self.todo_list_panel.width(), 0)
             self.todo_list_panel.setSidebarVisible(False)
+        self._syncMainWindowLayout()
 
     def _onSettingsButtonToggled(self, state):
         if state is True:
-            self.settings_panel_placeholder.setFixedHeight(12)
-            self.settings_panel.adjustSize()
+            if self.settings_window.isMinimized():
+                self.settings_window.showNormal()
+            elif not self.settings_window.isVisible():
+                self.settings_window.show()
+            else:
+                self.settings_window.raise_()
+                self.settings_window.activateWindow()
         else:
-            self.settings_panel_placeholder.setFixedHeight(0)
-            self.settings_panel.resize(self.settings_panel.width(), 0)
+            self.settings_window.hide()
 
     def _onCalendarButtonClicked(self):
         # 确保不会重复创建

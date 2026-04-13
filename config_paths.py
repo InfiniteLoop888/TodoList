@@ -53,6 +53,11 @@ def _default_options_ini_text() -> str:
         "CALENDAR_Y = 90\n"
         "CALENDAR_WIDTH = 1011\n"
         "CALENDAR_HEIGHT = 733\n"
+        "SETTINGS_MAXIMIZED = False\n"
+        "SETTINGS_X = 180\n"
+        "SETTINGS_Y = 120\n"
+        "SETTINGS_WIDTH = 584\n"
+        "SETTINGS_HEIGHT = 514\n"
         "TODO_ITEM_FONT_PX = 16\n"
     )
 
