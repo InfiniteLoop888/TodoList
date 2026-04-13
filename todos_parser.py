@@ -13,8 +13,10 @@ class TODOParser:
                 "text": str(item.get("text", "")),
                 "done": bool(item.get("done", False)),
                 "reminder": item.get("reminder", None),
+                "order_key": item.get("order_key", item.get("created_order", None)),
+                "completed_rank": item.get("completed_rank", None),
             }
-        return {"text": str(item), "done": False, "reminder": None}
+        return {"text": str(item), "done": False, "reminder": None, "order_key": None, "completed_rank": None}
 
     def __init__(self, path):
         self.path = path

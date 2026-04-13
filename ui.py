@@ -478,6 +478,8 @@ class SingleTODOOption(SiDenseHContainer):
         self.addWidget(self.clock_icon, "right")
 
         self.reminder_data = None
+        self.order_key = 0
+        self.completed_rank = None
         
         self.move = self.moveTo
 
@@ -585,6 +587,7 @@ class SingleTODOOption(SiDenseHContainer):
     def reloadStyleSheet(self):
         super().reloadStyleSheet()
 
+        self.setStyleSheet("background: transparent;")
         self.text_label.setFont(todo_item_font_qfont())
         self.check_box.text_label.setFont(todo_item_font_qfont())
         self._refresh_done_appearance()
@@ -607,7 +610,7 @@ class SingleTODOOption(SiDenseHContainer):
     def _onChecked(self, state):
         self._refresh_done_appearance()
         if self.todo_panel is not None and self.todo_panel.current_list_name:
-            self.todo_panel._syncCurrentListFromUI()
+            self.todo_panel._handleTodoCheckedStateChanged(self)
 
     def _on_context_menu_requested(self, pos):
         if self.todo_panel is not None:
@@ -616,6 +619,19 @@ class SingleTODOOption(SiDenseHContainer):
     def setText(self, text: str):
         self.text_label.setText(text)
         self._relayout_text_and_height()
+
+    def setOrderData(self, order_key, completed_rank=None):
+        try:
+            self.order_key = int(order_key)
+        except (TypeError, ValueError):
+            self.order_key = 0
+        if completed_rank is None:
+            self.completed_rank = None
+        else:
+            try:
+                self.completed_rank = int(completed_rank)
+            except (TypeError, ValueError):
+                self.completed_rank = None
 
     def setDone(self, done: bool):
         self.check_box.blockSignals(True)
@@ -850,6 +866,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.todo_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.todo_scroll_area.setFrameShape(QScrollArea.NoFrame)
         self.todo_scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.todo_scroll_area.viewport().setAutoFillBackground(False)
 
         self.todo_content = SiDenseVContainer()
         self.todo_content.setShrinking(True)
@@ -999,6 +1016,8 @@ class TODOListPanel(ThemedOptionCardPlane):
                 SiGlobal.siui.colors["TEXT_B"],
             )
         )
+        self.todo_content.setStyleSheet("background: transparent;")
+        self.todo_scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
         self.todo_scroll_area.setStyleSheet(
             """
             QScrollArea {{
@@ -1084,17 +1103,20 @@ class TODOListPanel(ThemedOptionCardPlane):
     def _onInlineAddCancelButtonClicked(self):
         self._setInlineAddVisible(False)
 
-    def _addTODOWidget(self, text, done=False, reminder=None):
+    def _addTODOWidget(self, text, done=False, reminder=None, order_key=0, completed_rank=None):
         new_todo = SingleTODOOption(self, self.todo_content)
         self.todo_content.addWidget(new_todo)
         new_todo.setText(text)
+        new_todo.setOrderData(order_key, completed_rank)
         new_todo.setDone(done)
         new_todo.setReminder(reminder)
         new_todo.show()
         new_todo.adjustSize()
+        return new_todo
 
     def addTODO(self, text):
-        self._addTODOWidget(text)
+        new_todo = self._addTODOWidget(text, order_key=self._next_order_key())
+        self._reposition_todo_by_rule(new_todo)
         self._syncCurrentListFromUI()
         self.adjustSize()
         self.updateTODOAmount()
@@ -1109,7 +1131,9 @@ class TODOListPanel(ThemedOptionCardPlane):
             {
                 "text": widget.text_label.text(),
                 "done": widget.check_box.isChecked(),
-                "reminder": getattr(widget, "reminder_data", None)
+                "reminder": getattr(widget, "reminder_data", None),
+                "order_key": getattr(widget, "order_key", 0),
+                "completed_rank": getattr(widget, "completed_rank", None),
             }
             for widget in self._todoWidgets()
         ]
@@ -1127,13 +1151,98 @@ class TODOListPanel(ThemedOptionCardPlane):
             self.todo_content.removeWidget(widget)
             widget.close()
 
+    def _next_order_key(self):
+        orders = []
+        for todo in self.todo_lists.get(self.current_list_name, []):
+            if isinstance(todo, dict):
+                order_key = todo.get("order_key", None)
+                if isinstance(order_key, (int, float)):
+                    orders.append(int(order_key))
+        for widget in self._todoWidgets():
+            order_key = getattr(widget, "order_key", None)
+            if isinstance(order_key, (int, float)):
+                orders.append(int(order_key))
+        return max(orders, default=0) + 1
+
+    def _next_completed_rank(self):
+        ranks = []
+        for todo in self.todo_lists.get(self.current_list_name, []):
+            if isinstance(todo, dict):
+                completed_rank = todo.get("completed_rank", None)
+                if isinstance(completed_rank, (int, float)):
+                    ranks.append(int(completed_rank))
+        for widget in self._todoWidgets():
+            completed_rank = getattr(widget, "completed_rank", None)
+            if isinstance(completed_rank, (int, float)):
+                ranks.append(int(completed_rank))
+        return max(ranks, default=0) + 1
+
+    def _reposition_todo_by_rule(self, widget):
+        todos = self._todoWidgets()
+        if widget not in todos:
+            return False
+
+        other_todos = [todo for todo in todos if todo is not widget]
+        if widget.check_box.isChecked():
+            current_completed_rank = getattr(widget, "completed_rank", 0) or 0
+            target_idx = (
+                sum(1 for todo in other_todos if not todo.check_box.isChecked())
+                + sum(
+                    1
+                    for todo in other_todos
+                    if todo.check_box.isChecked() and (getattr(todo, "completed_rank", 0) or 0) > current_completed_rank
+                )
+            )
+        else:
+            current_order_key = getattr(widget, "order_key", 0)
+            target_idx = sum(
+                1
+                for todo in other_todos
+                if not todo.check_box.isChecked() and getattr(todo, "order_key", 0) > current_order_key
+            )
+
+        return self._reinsert_todo_widget(widget, target_idx)
+
+    def _handleTodoCheckedStateChanged(self, widget):
+        if widget not in self._todoWidgets():
+            return
+        if widget.check_box.isChecked():
+            widget.completed_rank = self._next_completed_rank()
+        else:
+            widget.completed_rank = None
+        self._reposition_todo_by_rule(widget)
+        self._refresh_completed_ranks_from_ui()
+        self._syncCurrentListFromUI()
+        self.adjustSize()
+        self.updateTODOAmount()
+
+    def _refresh_completed_ranks_from_ui(self):
+        checked_widgets = [widget for widget in self._todoWidgets() if widget.check_box.isChecked()]
+        next_rank = len(checked_widgets)
+        for widget in self._todoWidgets():
+            if widget.check_box.isChecked():
+                widget.completed_rank = next_rank
+                next_rank -= 1
+            else:
+                widget.completed_rank = None
+
+    def _refresh_order_keys_from_ui(self):
+        todos = self._todoWidgets()
+        next_order = len(todos)
+        for widget in todos:
+            widget.order_key = next_order
+            next_order -= 1
+
     def _refreshListButtonsState(self):
         for list_name, button in self.list_buttons.items():
-            button.setChecked(list_name == self.current_list_name)
+            is_current = list_name == self.current_list_name
+            button.setChecked(is_current)
+            self._apply_sidebar_button_theme(button, is_current)
 
     def _make_sidebar_row(self, inner_widget):
         """横向 stretch + 按钮，宽度变化时从左侧伸出，右缘始终贴齐容器（与卡片接缝）。"""
         row = QWidget(self.list_items_container)
+        row.setStyleSheet("background: transparent;")
         hl = QHBoxLayout(row)
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(0)
@@ -1223,11 +1332,30 @@ class TODOListPanel(ThemedOptionCardPlane):
         # 宽度与侧栏位置只由随后的 adjustSize（如 _setCurrentList）统一算一次，避免与 _rebuild 末尾重复排板
 
     def _apply_sidebar_text_color_styles(self):
-        # 仅设颜色；字号与字体族由 setFont（与卡片标题同一套 SiGlobal 字体）控制
-        sidebar_text_style = "color: {};".format(SiGlobal.siui.colors["TEXT_B"])
-        self.new_list_button.attachment().setStyleSheet(sidebar_text_style)
+        # 统一由按钮状态控制侧栏条目的背景与文字颜色
+        self._apply_sidebar_button_theme(self.new_list_button, False, is_new_button=True)
         for button in self.list_buttons.values():
-            button.attachment().setStyleSheet(sidebar_text_style)
+            self._apply_sidebar_button_theme(button)
+
+    def _apply_sidebar_button_theme(self, button, is_checked=None, is_new_button=False):
+        if is_checked is None:
+            is_checked = bool(button.isChecked())
+
+        if is_new_button:
+            button.setStateColor("#00FFFFFF", "#00FFFFFF")
+            text_color = SiGlobal.siui.colors["TEXT_B"]
+        else:
+            sidebar_selected_bg = Color.transparency(
+                SiGlobal.siui.colors["THEME_TRANSITION_A"],
+                0.38,
+            )
+            button.setStateColor(
+                "#00FFFFFF",
+                sidebar_selected_bg,
+            )
+            text_color = "#FFFFFF" if is_checked else SiGlobal.siui.colors["TEXT_B"]
+
+        button.attachment().setStyleSheet(f"color: {text_color};")
 
     def _setCurrentList(self, list_name, sync_before_switch=True, save_to_disk=True):
         if list_name not in self.todo_lists:
@@ -1244,11 +1372,15 @@ class TODOListPanel(ThemedOptionCardPlane):
                 text = str(todo.get("text", ""))
                 done = bool(todo.get("done", False))
                 reminder = todo.get("reminder", None)
+                order_key = int(todo.get("order_key", 0))
+                completed_rank = todo.get("completed_rank", None)
             else:
                 text = str(todo)
                 done = False
                 reminder = None
-            self._addTODOWidget(text, done, reminder)
+                order_key = 0
+                completed_rank = None
+            self._addTODOWidget(text, done, reminder, order_key, completed_rank)
 
         self._refreshListButtonsState()
         self._update_panel_title()
@@ -1367,9 +1499,34 @@ class TODOListPanel(ThemedOptionCardPlane):
         todos = self._todoWidgets()
         if widget not in todos:
             return
+        new_list_index = self._clamp_todo_target_index(widget, new_list_index, todos)
+        if not self._reinsert_todo_widget(widget, new_list_index):
+            return
+        self._refresh_order_keys_from_ui()
+        self._refresh_completed_ranks_from_ui()
+        self._syncCurrentListFromUI()
+        self.adjustSize()
+        self.updateTODOAmount()
+
+    def _clamp_todo_target_index(self, widget, new_list_index, todos=None):
+        if todos is None:
+            todos = self._todoWidgets()
+        other_todos = [todo for todo in todos if todo is not widget]
+        if widget.check_box.isChecked():
+            lower_bound = sum(1 for todo in other_todos if not todo.check_box.isChecked())
+            upper_bound = len(other_todos)
+        else:
+            lower_bound = 0
+            upper_bound = sum(1 for todo in other_todos if not todo.check_box.isChecked())
+        return max(lower_bound, min(int(new_list_index), upper_bound))
+
+    def _reinsert_todo_widget(self, widget, new_list_index):
+        todos = self._todoWidgets()
+        if widget not in todos:
+            return False
         old_i = todos.index(widget)
         if old_i == new_list_index:
-            return
+            return False
         self.todo_content.removeWidget(widget)
         wtop = self.todo_content.widgets_top
         base = None
@@ -1379,13 +1536,11 @@ class TODOListPanel(ThemedOptionCardPlane):
                 break
         if base is None:
             base = 2
-        insert_at = base + new_list_index
+        insert_at = base + max(0, new_list_index)
         self.todo_content.addWidget(widget, side="top", index=insert_at)
         # 高度未变时不会触发 resizeEvent，需手动按 widgets_top 新顺序重排子控件位置
         self.todo_content.adjustWidgetsGeometry()
-        self._syncCurrentListFromUI()
-        self.adjustSize()
-        self.updateTODOAmount()
+        return True
 
     def _show_todo_context_menu(self, widget, pos):
         todos = self._todoWidgets()
@@ -1570,19 +1725,51 @@ class TODOListPanel(ThemedOptionCardPlane):
                     continue
                 if isinstance(todos, list):
                     normalized_lists[name] = []
+                    fallback_order_key = len(todos)
                     for todo in todos:
                         if isinstance(todo, dict):
+                            order_key = todo.get("order_key", None)
+                            if not isinstance(order_key, (int, float)):
+                                order_key = todo.get("created_order", None)
+                            if not isinstance(order_key, (int, float)):
+                                order_key = fallback_order_key
+                            completed_rank = todo.get("completed_rank", None)
                             normalized_lists[name].append(
                                 {
                                     "text": str(todo.get("text", "")),
                                     "done": bool(todo.get("done", False)),
                                     "reminder": todo.get("reminder", None),
+                                    "order_key": int(order_key),
+                                    "completed_rank": int(completed_rank) if isinstance(completed_rank, (int, float)) else None,
                                 }
                             )
                         else:
                             normalized_lists[name].append(
-                                {"text": str(todo), "done": False, "reminder": None}
+                                {
+                                    "text": str(todo),
+                                    "done": False,
+                                    "reminder": None,
+                                    "order_key": fallback_order_key,
+                                    "completed_rank": None,
+                                }
                             )
+                        fallback_order_key -= 1
+
+                    checked_widgets = [todo for todo in normalized_lists[name] if todo.get("done", False)]
+                    next_completed_rank = len(checked_widgets)
+                    for item in normalized_lists[name]:
+                        if item.get("done", False):
+                            if item.get("completed_rank", None) is None:
+                                item["completed_rank"] = next_completed_rank
+                            next_completed_rank -= 1
+                        else:
+                            item["completed_rank"] = None
+
+                    undone = [todo for todo in normalized_lists[name] if not todo.get("done", False)]
+                    done = [todo for todo in normalized_lists[name] if todo.get("done", False)]
+                    undone.sort(key=lambda item: int(item.get("order_key", 0)), reverse=True)
+                    done.sort(key=lambda item: int(item.get("completed_rank", 0)), reverse=True)
+                    normalized_lists[name] = undone + done
 
         if not normalized_lists:
             normalized_lists = {"默认清单": []}
@@ -2940,6 +3127,10 @@ class SettingsPanel(ThemedOptionCardPlane):
         self.setThemeColor(SiGlobal.siui.colors["PANEL_THEME"])
         super().reloadStyleSheet()
         text_d = SiGlobal.siui.colors["TEXT_D"]
+        # self.settings_footer_credits.setText(
+        #     '<a href="https://github.com/InfiniteLoop888/TodoList" '
+        #     'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
+        # )
         self.settings_footer_credits.setText(
             '<a href="https://github.com/InfiniteLoop888/TodoList" '
             'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
