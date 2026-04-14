@@ -126,8 +126,8 @@ class SiDenseHContainer(ABCDenseContainer):
             return
 
         if widget in self.widgets_right:
-            index = self.widgets_left.index(widget)
-            self.widgets_left.pop(index)
+            index = self.widgets_right.index(widget)
+            self.widgets_right.pop(index)
             return
 
         raise ValueError(f"Widget provided ({widget}) is not in this container.")

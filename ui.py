@@ -99,6 +99,47 @@ def apply_todo_item_font_setting():
         main_window.todo_list_panel.refresh_todo_item_typography()
 
 
+def todo_created_at_ts(value=None):
+    if isinstance(value, (int, float)):
+        return int(value)
+    return int(datetime.now().timestamp())
+
+
+def todo_created_day(value=None):
+    try:
+        return datetime.fromtimestamp(todo_created_at_ts(value)).date()
+    except (OSError, OverflowError, ValueError):
+        return datetime.now().date()
+
+
+def todo_group_title(day_value):
+    today = date.today()
+    if day_value == today:
+        return "今天添加"
+    if day_value == today - timedelta(days=1):
+        return "昨天添加"
+    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    return "{} 周{}".format(day_value.strftime("%Y-%m-%d"), weekdays[day_value.weekday()])
+
+
+def todo_bool_field(value):
+    """
+    兼容历史/脏数据：避免 bool("false") == True 这种反直觉结果。
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+
+def todo_origin_list_field(value):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s == "" or s.lower() in ("none", "null"):
+        return None
+    return s
+
+
 def lock_position(state):
     SiGlobal.todo_list.position_locked = state
 
@@ -471,6 +512,24 @@ class SingleSettingOption(SiDenseVContainer):
         self.description.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_D"]))
 
 
+class TODOGroupHeader(SiLabel):
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.setText(title)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setFixedHeight(24)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.reloadStyleSheet()
+
+    def reloadStyleSheet(self):
+        super().reloadStyleSheet()
+        f = QFont(SiGlobal.siui.fonts["S_BOLD"])
+        f.setPixelSize(11)
+        self.setFont(f)
+        self.setFixedStyleSheet("padding-left: 2px; padding-top: 2px; background: transparent;")
+        self.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_D"]))
+
+
 class SingleTODOOption(SiDenseHContainer):
     # 打勾框与右侧正文的间距（SiDenseHContainer.spacing，默认 16 偏大）
     TODO_ROW_SPACING = 6
@@ -525,6 +584,8 @@ class SingleTODOOption(SiDenseHContainer):
         self.todo_id = TODOParser.generate_todo_id()
         self.order_key = 0
         self.completed_rank = None
+        self.created_at = todo_created_at_ts()
+        self.today_priority = False
         self.origin_list = None
         self.deleted_at = None
         self.archived_at = None
@@ -553,6 +614,7 @@ class SingleTODOOption(SiDenseHContainer):
         self.clock_icon.resize(icon_size + 8, icon_size + 8)
 
         self._relayout_text_and_height()
+        self.refreshTodayHighlight()
 
     def _relayout_text_and_height(self, total_width=None):
         if total_width is None:
@@ -635,11 +697,47 @@ class SingleTODOOption(SiDenseHContainer):
     def reloadStyleSheet(self):
         super().reloadStyleSheet()
 
-        self.setStyleSheet("background: transparent;")
         self.text_label.setFont(todo_item_font_qfont())
         self.check_box.text_label.setFont(todo_item_font_qfont())
         self._refresh_done_appearance()
         self.clock_icon.load('<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12,0C5.383,0,0,5.383,0,12s5.383,12,12,12,12-5.383,12-12S18.617,0,12,0Zm0,22c-5.514,0-10-4.486-10-10S6.486,2,12,2s10,4.486,10,10-4.486,10-10,10Zm5-10h-4V6c0-.552-.448-1-1-1s-1,.448-1,1v7c0,.552,.448,1,1,1h5c.552,0,1-.448,1-1s-.448-1-1-1Z" fill="{}" /></svg>'.format(SiGlobal.siui.colors["TEXT_C"]).encode())
+        self.refreshTodayHighlight()
+
+    def _active_today_highlight(self):
+        if self.check_box.isChecked():
+            return None
+        manual = todo_bool_field(getattr(self, "today_priority", False))
+        due_today = False
+        if self.todo_panel is not None:
+            due_today = self.todo_panel._todo_due_today(getattr(self, "reminder_data", None))
+        if manual:
+            return "manual"
+        if due_today:
+            return "due_today"
+        return None
+
+    def refreshTodayHighlight(self):
+        mode = self._active_today_highlight()
+        # 与侧栏选中态同一套紫色系（THEME_TRANSITION_A），不再用线框区分，只用透明度区分强度
+        accent = SiGlobal.siui.colors["THEME_TRANSITION_A"]
+        if mode == "manual":
+            bg = Color.transparency(accent, 0.22)
+            self.setFixedStyleSheet(
+                "border-radius: 8px; padding: 2px 6px; border: none; background-color: {};".format(bg)
+            )
+            self.setHint("今日优先")
+        elif mode == "due_today":
+            bg = Color.transparency(accent, 0.14)
+            self.setFixedStyleSheet(
+                "border-radius: 8px; padding: 2px 6px; border: none; background-color: {};".format(bg)
+            )
+            self.setHint("今日到期提醒")
+        else:
+            self.setFixedStyleSheet("border-radius: 8px; padding: 2px 6px; border: none; background-color: transparent;")
+            self.setHint("")
+
+        # 让行容器本体吃到 fixed_stylesheet + 动态补充（SiDenseHContainer 继承链支持 fixed_stylesheet）
+        self.setStyleSheet("")
 
     def _refresh_done_appearance(self):
         if self.check_box.isChecked():
@@ -668,11 +766,22 @@ class SingleTODOOption(SiDenseHContainer):
         self.text_label.setText(text)
         self._relayout_text_and_height()
 
-    def setTodoMeta(self, todo_id=None, origin_list=None, deleted_at=None, archived_at=None):
+    def setTodoMeta(
+        self,
+        todo_id=None,
+        created_at=None,
+        today_priority=False,
+        origin_list=None,
+        deleted_at=None,
+        archived_at=None,
+    ):
         self.todo_id = str(todo_id).strip() if todo_id else TODOParser.generate_todo_id()
-        self.origin_list = origin_list
+        self.created_at = todo_created_at_ts(created_at)
+        self.today_priority = todo_bool_field(today_priority)
+        self.origin_list = todo_origin_list_field(origin_list)
         self.deleted_at = deleted_at
         self.archived_at = archived_at
+        self.refreshTodayHighlight()
 
     def setOrderData(self, order_key, completed_rank=None):
         try:
@@ -692,6 +801,7 @@ class SingleTODOOption(SiDenseHContainer):
         self.check_box.setChecked(done)
         self.check_box.blockSignals(False)
         self._refresh_done_appearance()
+        self.refreshTodayHighlight()
 
     def setReminder(self, reminder_data):
         self.reminder_data = reminder_data
@@ -703,6 +813,7 @@ class SingleTODOOption(SiDenseHContainer):
         else:
             self.clock_icon.hide()
         self._relayout_text_and_height()
+        self.refreshTodayHighlight()
 
     def adjustSize(self):
         heights = [self.text_label.height(), self.check_box.height()]
@@ -878,6 +989,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.current_list_name = ""
         self._previous_regular_list_name = ""
         self.list_buttons = {}
+        self._group_headers = []
         self.sidebar_host = self
 
         self.body().setUseMoveTo(False)
@@ -1024,11 +1136,15 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.archive_button.resize(32, 32)
         self.archive_button.setHint("查看归档")
         self.archive_button.clicked.connect(lambda: self._openSystemList(TODOParser.SYSTEM_ARCHIVE_LIST))
+        self.archive_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.archive_button.customContextMenuRequested.connect(self._show_archive_button_context_menu)
 
         self.trash_button = SiSimpleButton(self)
         self.trash_button.resize(32, 32)
         self.trash_button.setHint("查看回收站")
         self.trash_button.clicked.connect(lambda: self._openSystemList(TODOParser.SYSTEM_TRASH_LIST))
+        self.trash_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.trash_button.customContextMenuRequested.connect(self._show_trash_button_context_menu)
 
         self.footer().addWidget(self.trash_button, "right")
         self.footer().addWidget(self.archive_button, "right")
@@ -1068,6 +1184,8 @@ class TODOListPanel(ThemedOptionCardPlane):
             self._sidebar_sync_attachment_right(button)
         self._sidebar_sync_attachment_right(self.new_list_button)
         self.no_todo_label.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_E"]))
+        for header in self._group_headers:
+            header.reloadStyleSheet()
         self.add_todo_button.attachment().load(SiGlobal.siui.icons["fi-rr-apps-add"])
         self.archive_button.attachment().load(
             SiGlobal.siui.icons.get("fi-rr-box", SiGlobal.siui.icons.get("fi-rr-folder", SiGlobal.siui.icons["fi-rr-list-check"]))
@@ -1118,12 +1236,15 @@ class TODOListPanel(ThemedOptionCardPlane):
             }}
             """.format(Color.transparency(SiGlobal.siui.colors["TEXT_D"], 0.7))
         )
+        self._refreshTodoPriorityHighlights()
 
     def _onCompleteAllButtonClicked(self):
         if self._isSystemListCurrent():
             return
         for obj in self._todoWidgets():
             obj.check_box.setChecked(True)
+        # 批量勾选会触发多次刷新/甚至后续整表重建，这里统一收敛一次高亮，避免已完成项残留紫色底
+        self._refreshTodoPriorityHighlights()
 
     def refresh_todo_item_typography(self):
         self.inline_add_text_edit.setFont(todo_item_font_qfont())
@@ -1194,14 +1315,175 @@ class TODOListPanel(ThemedOptionCardPlane):
     def addTODO(self, text):
         if self._isSystemListCurrent():
             return
+        need_group_rebuild = (len(self._todoWidgets()) == 0) or (not self._group_headers)
         new_todo = self._addTODOWidget(text, order_key=self._next_order_key())
+        new_todo.setTodoMeta(created_at=todo_created_at_ts(), today_priority=False)
         self._reposition_todo_by_rule(new_todo)
         self._syncCurrentListFromUI()
+        if need_group_rebuild:
+            self._refreshCurrentListDisplay()
         self.adjustSize()
         self.updateTODOAmount()
 
     def _todoWidgets(self):
         return [widget for widget in self.todo_content.widgets_top if isinstance(widget, SingleTODOOption)]
+
+    def _clearTodoGroupHeaders(self):
+        for widget in list(self._group_headers):
+            self.todo_content.removeWidget(widget)
+            widget.close()
+        self._group_headers = []
+
+    def _refreshCurrentListDisplay(self):
+        if self.current_list_name in self.todo_lists:
+            self._setCurrentList(self.current_list_name, sync_before_switch=False, save_to_disk=False)
+
+    def _snapshot_todo_group_membership(self, widget, done_override=None):
+        # toggled 触发时 isChecked() 已是新值；对比「变更前后」分段时需可覆盖 done
+        done = bool(widget.check_box.isChecked()) if done_override is None else bool(done_override)
+        created_day = todo_created_day(getattr(widget, "created_at", None))
+        manual = todo_bool_field(getattr(widget, "today_priority", False))
+        due_today = self._todo_due_today(getattr(widget, "reminder_data", None))
+        highlight = None
+        if not done:
+            if manual:
+                highlight = "manual"
+            elif due_today:
+                highlight = "due_today"
+        return {
+            "done": done,
+            "created_day": str(created_day),
+            "manual_today_priority": manual,
+            "due_today": due_today,
+            "highlight": highlight,
+        }
+
+    def _maybeRefreshGroupedDisplay(self, widget, before, after=None):
+        if after is None:
+            after = self._snapshot_todo_group_membership(widget)
+        if before.get("created_day") != after.get("created_day"):
+            self._refreshCurrentListDisplay()
+            return
+        # 勾选/完成态变化不整表重建（避免界面跳变）；顺序由 _reflowTodoGroupedSectionFromSyncedData 收敛。
+        if before.get("highlight") != after.get("highlight"):
+            self._refreshTodoPriorityHighlights()
+
+    def _refreshTodoPriorityHighlights(self):
+        for w in self._todoWidgets():
+            if isinstance(w, SingleTODOOption):
+                w.refreshTodayHighlight()
+
+    @staticmethod
+    def _todo_due_today(reminder_data):
+        if not isinstance(reminder_data, dict):
+            return False
+        timestamp = reminder_data.get("timestamp")
+        if not isinstance(timestamp, (int, float)):
+            return False
+        try:
+            return datetime.fromtimestamp(timestamp).date() == date.today()
+        except (OSError, OverflowError, ValueError):
+            return False
+
+    def _groupedTodosForDisplay(self, todos):
+        grouped = {}
+        for todo in todos:
+            day_key = todo_created_day(todo.get("created_at") if isinstance(todo, dict) else getattr(todo, "created_at", None))
+            grouped.setdefault(day_key, []).append(todo)
+
+        groups = []
+        for day_key in sorted(grouped.keys(), reverse=True):
+            groups.append((todo_group_title(day_key), grouped[day_key]))
+        return groups
+
+    def _reflowTodoGroupedSectionFromSyncedData(self):
+        """
+        有日期分组时，按 self.todo_lists（须已 _syncCurrentListFromUI）重排 todo_content 内
+        「分组标题 + 待办」顺序，不销毁控件、不重绘整表，避免勾选/拖拽后的标题错位。
+        """
+        if not self._group_headers:
+            return
+        list_name = self.current_list_name
+        if list_name not in self.todo_lists:
+            return
+        grouped = self._groupedTodosForDisplay(self.todo_lists[list_name])
+        if len(grouped) != len(self._group_headers):
+            return
+        headers_by_title = {}
+        for h in self._group_headers:
+            title = h.text()
+            if title not in headers_by_title:
+                headers_by_title[title] = h
+        id_to_widget = {}
+        for w in self._todoWidgets():
+            tid = getattr(w, "todo_id", None)
+            if tid is None:
+                return
+            id_to_widget[str(tid).strip()] = w
+        new_middle = []
+        for title, items in grouped:
+            h = headers_by_title.get(title)
+            if h is None:
+                return
+            new_middle.append(h)
+            for item in items:
+                if not isinstance(item, dict):
+                    return
+                tid = item.get("id")
+                if tid is None:
+                    return
+                w = id_to_widget.get(str(tid).strip())
+                if w is None:
+                    return
+                new_middle.append(w)
+        todos_set = set(self._todoWidgets())
+        if len(new_middle) != len(self._group_headers) + len(todos_set):
+            return
+        if {w for w in new_middle if isinstance(w, SingleTODOOption)} != todos_set:
+            return
+        wtop = self.todo_content.widgets_top
+        insert_base = 0
+        for w in wtop:
+            if isinstance(w, (TODOGroupHeader, SingleTODOOption)):
+                break
+            insert_base += 1
+        tc = self.todo_content
+        tc.setUpdatesEnabled(False)
+        try:
+            for w in new_middle:
+                tc.removeWidget(w)
+            insert_at = insert_base
+            for w in new_middle:
+                tc.addWidget(w, side="top", index=insert_at)
+                insert_at += 1
+            tc.adjustWidgetsGeometry()
+        finally:
+            tc.setUpdatesEnabled(True)
+
+    def _renderCurrentListTodos(self, todos):
+        self._clearTodosInUI()
+        self._setInlineAddVisible(False)
+        for title, items in self._groupedTodosForDisplay(todos):
+            header = TODOGroupHeader(title, self.todo_content)
+            self.todo_content.addWidget(header)
+            self._group_headers.append(header)
+            header.show()
+            for todo in items:
+                widget = self._addTODOWidget(
+                    str(todo.get("text", "")),
+                    bool(todo.get("done", False)),
+                    todo.get("reminder", None),
+                    int(todo.get("order_key", 0)),
+                    todo.get("completed_rank", None),
+                )
+                widget.setTodoMeta(
+                    todo.get("id"),
+                    todo.get("created_at", None),
+                    todo_bool_field(todo.get("today_priority", False)),
+                    todo_origin_list_field(todo.get("origin_list", None)),
+                    todo.get("deleted_at", None),
+                    todo.get("archived_at", None),
+                )
 
     def _visibleListNames(self):
         return [
@@ -1224,7 +1506,9 @@ class TODOListPanel(ThemedOptionCardPlane):
                 "reminder": getattr(widget, "reminder_data", None),
                 "order_key": getattr(widget, "order_key", 0),
                 "completed_rank": getattr(widget, "completed_rank", None),
-                "origin_list": getattr(widget, "origin_list", None),
+                "created_at": getattr(widget, "created_at", todo_created_at_ts()),
+                "today_priority": todo_bool_field(getattr(widget, "today_priority", False)),
+                "origin_list": todo_origin_list_field(getattr(widget, "origin_list", None)),
                 "deleted_at": getattr(widget, "deleted_at", None),
                 "archived_at": getattr(widget, "archived_at", None),
             }
@@ -1245,6 +1529,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         for widget in list(self._todoWidgets()):
             self.todo_content.removeWidget(widget)
             widget.close()
+        self._clearTodoGroupHeaders()
 
     def _next_order_key(self):
         orders = []
@@ -1277,37 +1562,68 @@ class TODOListPanel(ThemedOptionCardPlane):
         if widget not in todos:
             return False
 
-        other_todos = [todo for todo in todos if todo is not widget]
-        if widget.check_box.isChecked():
-            current_completed_rank = getattr(widget, "completed_rank", 0) or 0
-            target_idx = (
-                sum(1 for todo in other_todos if not todo.check_box.isChecked())
-                + sum(
-                    1
-                    for todo in other_todos
-                    if todo.check_box.isChecked() and (getattr(todo, "completed_rank", 0) or 0) > current_completed_rank
-                )
-            )
-        else:
-            current_order_key = getattr(widget, "order_key", 0)
-            target_idx = sum(
-                1
-                for todo in other_todos
-                if not todo.check_box.isChecked() and getattr(todo, "order_key", 0) > current_order_key
-            )
+        # 在有分组混排的情况下，绝对计数法会因物理交错而失效。
+        # 直接按照全局规则重排所有待办：
+        # 1. 未完成在前 (isChecked() == False)，已完成在后
+        # 2. 未完成内部按 order_key 倒序
+        # 3. 已完成内部按 completed_rank 倒序
+        def sort_key(w):
+            is_done = w.check_box.isChecked()
+            if is_done:
+                return (1, -(getattr(w, "completed_rank", 0) or 0))
+            else:
+                return (0, -(getattr(w, "order_key", 0) or 0))
+                
+        todos.sort(key=sort_key)
 
-        return self._reinsert_todo_widget(widget, target_idx)
+        tc = self.todo_content
+        wtop = list(tc.widgets_top)
+        
+        # 保持原物理列表里的非待办项（如分组标题）位置不动，把重排好的待办填回去
+        # 作为同步到 todo_lists 之前的中间态，之后的 reflow 会彻底整理分组顺序。
+        todo_indices = [i for i, w in enumerate(wtop) if isinstance(w, SingleTODOOption)]
+        for i, new_w in zip(todo_indices, todos):
+            wtop[i] = new_w
+            
+        tc.setUpdatesEnabled(False)
+        try:
+            for w in list(tc.widgets_top):
+                tc.removeWidget(w)
+            for w in wtop:
+                tc.addWidget(w, side="top")
+            tc.adjustWidgetsGeometry()
+        finally:
+            tc.setUpdatesEnabled(True)
+
+        return True
 
     def _handleTodoCheckedStateChanged(self, widget):
         if widget not in self._todoWidgets():
             return
+        before = self._snapshot_todo_group_membership(
+            widget, done_override=not bool(widget.check_box.isChecked())
+        )
         if widget.check_box.isChecked():
             widget.completed_rank = self._next_completed_rank()
+            widget.today_priority = False
+            # 去掉勾选前的 _refresh_completed_ranks_from_ui，避免在分组模式下，物理位置靠后的新勾选待办被其他组的已完成项抢走最高 rank
         else:
             widget.completed_rank = None
+            # 先统一未完成项的 order_key，再用 order_key 计算插入位置，避免相对顺序漂移
+            self._refresh_order_keys_from_ui()
         self._reposition_todo_by_rule(widget)
-        self._refresh_completed_ranks_from_ui()
+        # 勾选路径在 reposition 后可能仍需把 rank 收敛到最终视觉顺序；未完成路径这里再刷一次是幂等的
+        if widget.check_box.isChecked():
+            self._refresh_completed_ranks_from_ui()
+        else:
+            self._refresh_order_keys_from_ui()
         self._syncCurrentListFromUI()
+        after = self._snapshot_todo_group_membership(widget)
+        self._maybeRefreshGroupedDisplay(widget, before, after)
+        self._reflowTodoGroupedSectionFromSyncedData()
+        # 重建列表时，旧控件上的 refresh 可能发生在销毁前；这里再兜底一次，确保已完成不会残留高亮样式
+        if widget in self._todoWidgets():
+            widget.refreshTodayHighlight()
         self.adjustSize()
         self.updateTODOAmount()
 
@@ -1462,31 +1778,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.current_list_name = list_name
         if not TODOParser.is_system_list_name(list_name):
             self._previous_regular_list_name = list_name
-        self._clearTodosInUI()
-        self._setInlineAddVisible(False)
-        for todo in self.todo_lists.get(list_name, []):
-            if isinstance(todo, dict):
-                todo_id = todo.get("id")
-                text = str(todo.get("text", ""))
-                done = bool(todo.get("done", False))
-                reminder = todo.get("reminder", None)
-                order_key = int(todo.get("order_key", 0))
-                completed_rank = todo.get("completed_rank", None)
-                origin_list = todo.get("origin_list", None)
-                deleted_at = todo.get("deleted_at", None)
-                archived_at = todo.get("archived_at", None)
-            else:
-                todo_id = None
-                text = str(todo)
-                done = False
-                reminder = None
-                order_key = 0
-                completed_rank = None
-                origin_list = None
-                deleted_at = None
-                archived_at = None
-            widget = self._addTODOWidget(text, done, reminder, order_key, completed_rank)
-            widget.setTodoMeta(todo_id, origin_list, deleted_at, archived_at)
+        self._renderCurrentListTodos(self.todo_lists.get(list_name, []))
 
         self._refreshListButtonsState()
         self._update_panel_title()
@@ -1630,8 +1922,10 @@ class TODOListPanel(ThemedOptionCardPlane):
     def _remove_reminder_from_context(self, widget):
         if widget not in self._todoWidgets():
             return
+        before = self._snapshot_todo_group_membership(widget)
         widget.setReminder(None)
         self._syncCurrentListFromUI()
+        self._maybeRefreshGroupedDisplay(widget, before)
         self.adjustSize()
 
     def _set_reminder_from_context(self, widget):
@@ -1639,10 +1933,21 @@ class TODOListPanel(ThemedOptionCardPlane):
             return
         dlg = ReminderDialog(self.window(), getattr(widget, "reminder_data", None))
         if dlg.exec_() == QDialog.Accepted:
+            before = self._snapshot_todo_group_membership(widget)
             reminder_data = dlg.get_reminder_data()
             widget.setReminder(reminder_data)
             self._syncCurrentListFromUI()
+            self._maybeRefreshGroupedDisplay(widget, before)
             self.adjustSize()
+
+    def _toggle_today_priority_from_context(self, widget):
+        if widget not in self._todoWidgets():
+            return
+        before = self._snapshot_todo_group_membership(widget)
+        widget.today_priority = not todo_bool_field(getattr(widget, "today_priority", False))
+        self._syncCurrentListFromUI()
+        self._maybeRefreshGroupedDisplay(widget, before)
+        self.adjustSize()
 
     def _move_todo_in_list(self, widget, new_list_index):
         todos = self._todoWidgets()
@@ -1654,6 +1959,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         self._refresh_order_keys_from_ui()
         self._refresh_completed_ranks_from_ui()
         self._syncCurrentListFromUI()
+        self._reflowTodoGroupedSectionFromSyncedData()
         self.adjustSize()
         self.updateTODOAmount()
 
@@ -1669,23 +1975,41 @@ class TODOListPanel(ThemedOptionCardPlane):
             upper_bound = sum(1 for todo in other_todos if not todo.check_box.isChecked())
         return max(lower_bound, min(int(new_list_index), upper_bound))
 
+    def _content_index_before_nth_todo(self, n, skip_widget=None):
+        """
+        在 todo_content.widgets_top 中找到第 n 个 SingleTODOOption 的插入位置下标。
+        n 表示「排在该待办之前的待办数量」，范围 0..todo_count。
+        widgets_top 中可能夹杂分组标题等控件，不能再用固定 base + n 的方式插入。
+        """
+        wtop = self.todo_content.widgets_top
+        seen = 0
+        for i, w in enumerate(wtop):
+            if not isinstance(w, SingleTODOOption):
+                continue
+            if skip_widget is not None and w is skip_widget:
+                continue
+            if seen == n:
+                return i
+            seen += 1
+        return len(wtop)
+
     def _reinsert_todo_widget(self, widget, new_list_index):
         todos = self._todoWidgets()
         if widget not in todos:
             return False
         old_i = todos.index(widget)
         if old_i == new_list_index:
-            return False
+            # 逻辑顺序一致时，仍可能因分组标题导致视觉顺序错位，这里用真实列表下标再判断一次
+            before_idx = self._content_index_before_nth_todo(new_list_index)
+            try:
+                current_content_i = self.todo_content.widgets_top.index(widget)
+            except ValueError:
+                current_content_i = -1
+            if current_content_i == before_idx:
+                return False
         self.todo_content.removeWidget(widget)
-        wtop = self.todo_content.widgets_top
-        base = None
-        for i, w in enumerate(wtop):
-            if isinstance(w, SingleTODOOption):
-                base = i
-                break
-        if base is None:
-            base = 2
-        insert_at = base + max(0, new_list_index)
+        insert_at = self._content_index_before_nth_todo(new_list_index, skip_widget=widget)
+        insert_at = max(0, min(insert_at, len(self.todo_content.widgets_top)))
         self.todo_content.addWidget(widget, side="top", index=insert_at)
         # 高度未变时不会触发 resizeEvent，需手动按 widgets_top 新顺序重排子控件位置
         self.todo_content.adjustWidgetsGeometry()
@@ -1719,6 +2043,11 @@ class TODOListPanel(ThemedOptionCardPlane):
             act_done = QAction(self._menu_icon_from_svg_key("fi-rr-check"), "完成", self)
             act_done.triggered.connect(lambda: widget.check_box.setChecked(True))
             menu.addAction(act_done)
+
+            today_text = "取消今日优先" if getattr(widget, "today_priority", False) else "标记为今日优先"
+            act_today_priority = QAction(self._menu_icon_from_svg_key("fi-rr-star"), today_text, self)
+            act_today_priority.triggered.connect(lambda: self._toggle_today_priority_from_context(widget))
+            menu.addAction(act_today_priority)
 
         if widget.check_box.isChecked():
             act_archive_single = QAction(self._menu_icon_from_svg_key("fi-rr-box"), "归档", self)
@@ -1781,6 +2110,32 @@ class TODOListPanel(ThemedOptionCardPlane):
         menu.addAction(act_delete)
         menu.exec_(widget.mapToGlobal(pos))
 
+    def _show_archive_button_context_menu(self, pos):
+        menu = QMenu(self)
+        apply_popup_menu_appearance(menu)
+
+        act_restore_all = QAction(self._menu_icon_from_svg_key("fi-rr-undo"), "全部恢复", self)
+        act_restore_all.triggered.connect(lambda: self._restore_all_system_todos(TODOParser.SYSTEM_ARCHIVE_LIST))
+        menu.addAction(act_restore_all)
+
+        act_delete_all = QAction(self._menu_icon_from_svg_key("fi-rr-trash"), "全部删除", self)
+        act_delete_all.triggered.connect(lambda: self._move_all_system_todos_to_trash(TODOParser.SYSTEM_ARCHIVE_LIST))
+        menu.addAction(act_delete_all)
+        menu.exec_(self.archive_button.mapToGlobal(pos))
+
+    def _show_trash_button_context_menu(self, pos):
+        menu = QMenu(self)
+        apply_popup_menu_appearance(menu)
+
+        act_restore_all = QAction(self._menu_icon_from_svg_key("fi-rr-undo"), "全部恢复", self)
+        act_restore_all.triggered.connect(lambda: self._restore_all_system_todos(TODOParser.SYSTEM_TRASH_LIST))
+        menu.addAction(act_restore_all)
+
+        act_delete_all = QAction(self._menu_icon_from_svg_key("fi-rr-cross"), "全部删除", self)
+        act_delete_all.triggered.connect(lambda: self._permanently_delete_all_system_todos(TODOParser.SYSTEM_TRASH_LIST))
+        menu.addAction(act_delete_all)
+        menu.exec_(self.trash_button.mapToGlobal(pos))
+
     def _archive_completed_todos(self, list_name=None):
         target_list = list_name or self.current_list_name
         if target_list not in self.todo_lists or TODOParser.is_system_list_name(target_list):
@@ -1834,6 +2189,42 @@ class TODOListPanel(ThemedOptionCardPlane):
         deleted = parser.permanently_delete_todo(widget.todo_id)
         if deleted is None:
             return
+        self.todo_lists = parser.lists
+        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._save_lists_to_disk()
+
+    def _restore_all_system_todos(self, list_name):
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        todos_to_restore = list(self.todo_lists.get(list_name, []))
+        if not todos_to_restore:
+            return
+        for item in todos_to_restore:
+            parser.restore_todo_from_system_list(item["id"])
+        self.todo_lists = parser.lists
+        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._save_lists_to_disk()
+
+    def _move_all_system_todos_to_trash(self, list_name):
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        todos_to_move = list(self.todo_lists.get(list_name, []))
+        if not todos_to_move:
+            return
+        for item in todos_to_move:
+            parser.move_todo_to_system_list(item["id"], TODOParser.SYSTEM_TRASH_LIST)
+        self.todo_lists = parser.lists
+        self._setCurrentList(self.current_list_name, sync_before_switch=False)
+        self._save_lists_to_disk()
+
+    def _permanently_delete_all_system_todos(self, list_name):
+        parser = ensure_todo_parser()
+        self._syncCurrentListFromUI(save_to_disk=False)
+        todos_to_delete = list(self.todo_lists.get(list_name, []))
+        if not todos_to_delete:
+            return
+        for item in todos_to_delete:
+            parser.permanently_delete_todo(item["id"])
         self.todo_lists = parser.lists
         self._setCurrentList(self.current_list_name, sync_before_switch=False)
         self._save_lists_to_disk()
@@ -2009,7 +2400,9 @@ class TODOListPanel(ThemedOptionCardPlane):
                                     "reminder": todo.get("reminder", None),
                                     "order_key": int(order_key),
                                     "completed_rank": int(completed_rank) if isinstance(completed_rank, (int, float)) else None,
-                                    "origin_list": todo.get("origin_list", None),
+                                    "created_at": todo_created_at_ts(todo.get("created_at", None)),
+                                    "today_priority": todo_bool_field(todo.get("today_priority", False)),
+                                    "origin_list": todo_origin_list_field(todo.get("origin_list", None)),
                                     "deleted_at": todo.get("deleted_at", None),
                                     "archived_at": todo.get("archived_at", None),
                                 }
@@ -2023,6 +2416,8 @@ class TODOListPanel(ThemedOptionCardPlane):
                                     "reminder": None,
                                     "order_key": fallback_order_key,
                                     "completed_rank": None,
+                                    "created_at": todo_created_at_ts(),
+                                    "today_priority": False,
                                     "origin_list": None,
                                     "deleted_at": None,
                                     "archived_at": None,
@@ -3407,14 +3802,13 @@ class SettingsPanel(ThemedOptionCardPlane):
         self.setThemeColor(SiGlobal.siui.colors["PANEL_THEME"])
         super().reloadStyleSheet()
         text_d = SiGlobal.siui.colors["TEXT_D"]
-        # self.settings_footer_credits.setText(
-        #     '<a href="https://github.com/InfiniteLoop888/TodoList" '
-        #     'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
-        # )
         self.settings_footer_credits.setText(
             '<a href="https://github.com/InfiniteLoop888/TodoList" '
             'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
         )
+        # self.settings_footer_credits.setText(
+        #     'style="color:{}; font-size:11px; text-decoration:none;">可爱湘 <span style="color:red;">❤️</span></a>'.format(text_d)
+        # )
         self.translucent_opacity_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.todo_font_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.translucent_opacity_slider.setStyleSheet(

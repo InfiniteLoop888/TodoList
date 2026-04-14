@@ -11,7 +11,7 @@ class TODOParser:
     SYSTEM_ARCHIVE_LIST = "__archive__"
     SYSTEM_TRASH_LIST = "__trash__"
     SYSTEM_LIST_NAMES = (SYSTEM_ARCHIVE_LIST, SYSTEM_TRASH_LIST)
-    VERSION = 3
+    VERSION = 4
 
     @staticmethod
     def generate_todo_id():
@@ -23,7 +23,18 @@ class TODOParser:
 
     @staticmethod
     def _normalize_todo_entry(item):
+        now = int(time.time())
         if isinstance(item, dict):
+            tp_raw = item.get("today_priority", False)
+            if isinstance(tp_raw, str):
+                today_priority = tp_raw.strip().lower() in ("1", "true", "yes", "y", "on")
+            else:
+                today_priority = bool(tp_raw)
+            origin_raw = str(item.get("origin_list", "")).strip()
+            if origin_raw == "" or origin_raw.lower() in ("none", "null"):
+                origin_list = None
+            else:
+                origin_list = origin_raw
             return {
                 "id": str(item.get("id", "")).strip() or TODOParser.generate_todo_id(),
                 "text": str(item.get("text", "")),
@@ -31,7 +42,9 @@ class TODOParser:
                 "reminder": item.get("reminder", None),
                 "order_key": item.get("order_key", item.get("created_order", None)),
                 "completed_rank": item.get("completed_rank", None),
-                "origin_list": str(item.get("origin_list", "")).strip() or None,
+                "created_at": int(item.get("created_at", now)) if isinstance(item.get("created_at", now), (int, float)) else now,
+                "today_priority": today_priority,
+                "origin_list": origin_list,
                 "deleted_at": item.get("deleted_at", None),
                 "archived_at": item.get("archived_at", None),
             }
@@ -42,6 +55,8 @@ class TODOParser:
             "reminder": None,
             "order_key": None,
             "completed_rank": None,
+            "created_at": now,
+            "today_priority": False,
             "origin_list": None,
             "deleted_at": None,
             "archived_at": None,
