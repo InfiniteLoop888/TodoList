@@ -2072,6 +2072,10 @@ class TODOListPanel(ThemedOptionCardPlane):
             menu.addAction(act_today_priority)
 
         if widget.check_box.isChecked():
+            act_undo_done = QAction(self._menu_icon_from_svg_key("fi-rr-undo"), "撤销完成", self)
+            act_undo_done.triggered.connect(lambda: widget.check_box.setChecked(False))
+            menu.addAction(act_undo_done)
+
             act_archive_single = QAction(self._menu_icon_from_svg_key("fi-rr-box"), "归档", self)
             act_archive_single.triggered.connect(lambda: self._archive_single_todo(widget))
             menu.addAction(act_archive_single)
@@ -3805,6 +3809,11 @@ class CalendarPanel(ThemedOptionCardPlane):
         act_reminder.triggered.connect(lambda: self._edit_calendar_todo_reminder(todo_data))
         menu.addAction(act_reminder)
 
+        if todo_data.get("reminder"):
+            act_remove_reminder = QAction(themed_icon_from_svg_key("fi-rr-cross", menu_left_pad=8), "删除提醒", self)
+            act_remove_reminder.triggered.connect(lambda: self._remove_calendar_todo_reminder(todo_data))
+            menu.addAction(act_remove_reminder)
+
         menu.addSeparator()
 
         done_text = "取消完成" if todo_data.get("done", False) else "完成"
@@ -3845,6 +3854,16 @@ class CalendarPanel(ThemedOptionCardPlane):
         if dlg.exec_() == QDialog.Accepted:
             reminder_data = dlg.get_reminder_data()
             parser.lists[list_name][index]["reminder"] = reminder_data
+            parser.write()
+            refresh_todo_views_from_parser(reload_main_panel=True)
+
+    def _remove_calendar_todo_reminder(self, todo_data):
+        parser = ensure_todo_parser()
+        list_name, index, todo = parser.find_todo(todo_data.get("id"), include_system_lists=False)
+        if todo is None:
+            return
+        if parser.lists[list_name][index].get("reminder"):
+            parser.lists[list_name][index]["reminder"] = None
             parser.write()
             refresh_todo_views_from_parser(reload_main_panel=True)
 
