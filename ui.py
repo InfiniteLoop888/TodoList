@@ -2196,6 +2196,7 @@ class TODOListPanel(ThemedOptionCardPlane):
             return
         target_list, _ = restored
         self.todo_lists = parser.lists
+        self._rebuildListButtons()
         self._setCurrentList(target_list, sync_before_switch=False)
         self._save_lists_to_disk()
 
@@ -2228,6 +2229,7 @@ class TODOListPanel(ThemedOptionCardPlane):
         for item in todos_to_restore:
             parser.restore_todo_from_system_list(item["id"])
         self.todo_lists = parser.lists
+        self._rebuildListButtons()
         self._setCurrentList(self.current_list_name, sync_before_switch=False)
         self._save_lists_to_disk()
 
