@@ -3,6 +3,13 @@ import calendar
 import heapq
 from datetime import datetime, date, timedelta
 
+try:
+    from lunar_python import Solar
+    from lunar_python.util import HolidayUtil
+    HAS_LUNAR = True
+except ImportError:
+    HAS_LUNAR = False
+
 from components import ThemedOptionCardPlane
 from icons import IconDictionary
 from PyQt5.Qt import QColor, QPoint
@@ -20,7 +27,7 @@ from PyQt5.QtCore import (
     QVariantAnimation,
     pyqtSignal,
 )
-from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap, QResizeEvent
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QAction,
@@ -48,7 +55,7 @@ from PyQt5.QtWidgets import (
 )
 from config_paths import ensure_user_ini_files
 from settings_parser import SettingsParser
-from windows_startup import get_startup_status, is_startup_enabled, set_startup_enabled, startup_supported
+from system_startup import get_startup_status, is_startup_enabled, set_startup_enabled, startup_supported
 from todos_parser import TODOParser
 
 from siui.components.widgets import (
@@ -3220,11 +3227,126 @@ class YearMonthPickerDialog(QDialog):
         return self.year_cb.currentData(), self.month_cb.currentData()
 
 
+class CalendarAddTodoDialog(QDialog):
+    def __init__(self, parent=None, default_date=None):
+        super().__init__(parent)
+        self.setWindowTitle("添加待办")
+        self.setFixedSize(360, 260)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        theme = SiGlobal.siui.colors["PANEL_THEME"]
+        bg = SiGlobal.siui.colors["BACKGROUND_COLOR"]
+        bg_deep = SiGlobal.siui.colors["BACKGROUND_DARK_COLOR"]
+        text_color = SiGlobal.siui.colors["TEXT_B"]
+        border = SiGlobal.siui.colors["BORDER_COLOR"]
+
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {bg}; color: {text_color}; }}
+            QLabel {{ color: {text_color}; font-size: 14px; }}
+            QLineEdit {{
+                border: 1px solid {border}; border-radius: 6px; padding: 6px 10px;
+                background-color: {bg_deep}; color: {text_color}; font-size: 14px;
+            }}
+            QComboBox {{
+                border: 1px solid {border}; border-radius: 6px; padding: 6px 10px;
+                background-color: {bg_deep}; color: {text_color}; font-size: 14px;
+            }}
+            QComboBox::drop-down {{ border: none; }}
+            QComboBox QAbstractItemView {{
+                background-color: {bg_deep}; color: {text_color};
+                selection-background-color: {theme};
+            }}
+            QPushButton {{
+                border: 1px solid {border}; border-radius: 6px; padding: 8px 24px;
+                background-color: {bg_deep}; color: {text_color}; font-size: 14px;
+            }}
+            QPushButton:hover {{ background-color: {SiGlobal.siui.colors["BUTTON_HOVER"]}; }}
+            QPushButton#btn_confirm {{ background-color: {theme}; color: #ffffff; border: none; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        grid = QGridLayout()
+        grid.setVerticalSpacing(16)
+
+        # 内容
+        grid.addWidget(QLabel("内容："), 0, 0)
+        self.text_input = QLineEdit()
+        grid.addWidget(self.text_input, 0, 1)
+
+        # 清单
+        grid.addWidget(QLabel("清单："), 1, 0)
+        self.list_cb = QComboBox()
+        parser = SiGlobal.todo_list.todos_parser
+        system_lists = {TODOParser.SYSTEM_TRASH_LIST, TODOParser.SYSTEM_ARCHIVE_LIST}
+        lists = [k for k in parser.lists.keys() if k not in system_lists]
+        self.list_cb.addItems(lists)
+        if hasattr(SiGlobal.todo_list, "current_list_name") and SiGlobal.todo_list.current_list_name in lists:
+            self.list_cb.setCurrentText(SiGlobal.todo_list.current_list_name)
+        grid.addWidget(self.list_cb, 1, 1)
+
+        # 提醒时间
+        grid.addWidget(QLabel("提醒时间："), 2, 0)
+        time_layout = QHBoxLayout()
+        self.hour_cb = QComboBox()
+        self.hour_cb.addItems([f"{i:02d}" for i in range(24)])
+        self.hour_cb.setCurrentText("09")
+        self.min_cb = QComboBox()
+        self.min_cb.addItems([f"{i:02d}" for i in range(60)])
+        self.min_cb.setCurrentText("00")
+        
+        time_layout.addWidget(self.hour_cb)
+        time_layout.addWidget(QLabel(":"))
+        time_layout.addWidget(self.min_cb)
+        time_layout.addStretch()
+        grid.addLayout(time_layout, 2, 1)
+
+        layout.addLayout(grid)
+        layout.addStretch()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_cancel = QPushButton("取消", self)
+        btn_cancel.clicked.connect(self.reject)
+        self.btn_confirm = QPushButton("确定", self)
+        self.btn_confirm.setObjectName("btn_confirm")
+        self.btn_confirm.clicked.connect(self.accept)
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(self.btn_confirm)
+
+        layout.addLayout(btn_layout)
+
+        self.default_date = default_date
+
+    def get_data(self):
+        text = self.text_input.text().strip()
+        list_name = self.list_cb.currentText()
+        
+        h = int(self.hour_cb.currentText())
+        m = int(self.min_cb.currentText())
+        
+        if self.default_date:
+            ts = int(datetime.combine(self.default_date, datetime.min.time().replace(hour=h, minute=m)).timestamp())
+        else:
+            ts = int(datetime.now().replace(hour=h, minute=m).timestamp())
+            
+        return {
+            "text": text,
+            "list": list_name,
+            "reminder": {"timestamp": ts, "repeat": "不重复", "priority": "不重要"}
+        }
+
+
 class CalendarDayWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.date = None
         self.is_current_month = False
+        self.is_holiday = False
+        self.is_workday = False
+        self.lunar_text = ""
         self.todo_items = []
         self._calendar_panel = None
 
@@ -3232,11 +3354,12 @@ class CalendarDayWidget(QWidget):
         self.setAttribute(Qt.WA_Hover, True)
 
         self.bg_label = SiLabel(self)
-        self.bg_label.setFixedStyleSheet("border-radius: 6px;")
+        self.bg_label.setFixedStyleSheet("border-radius: 0px;")
 
         self.date_label = SiLabel(self)
         f = QFont(SiGlobal.siui.fonts["S_NORMAL"])
         self.date_label.setFont(f)
+        self.date_label.setTextFormat(Qt.RichText)
         self.date_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.date_label.setAttribute(Qt.WA_TransparentForMouseEvents)
 
@@ -3246,6 +3369,12 @@ class CalendarDayWidget(QWidget):
         self.today_badge.setFixedSize(22, 22)
         self.today_badge.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.today_badge.hide()
+
+        self.holiday_badge = SiLabel(self)
+        self.holiday_badge.setAlignment(Qt.AlignCenter)
+        self.holiday_badge.setFixedSize(16, 16)
+        self.holiday_badge.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.holiday_badge.hide()
 
         self._todo_labels = []
 
@@ -3261,12 +3390,67 @@ class CalendarDayWidget(QWidget):
     def set_date(self, d, is_current):
         self.date = d
         self.is_current_month = is_current
-        self.date_label.setText(str(d.day))
+        
+        # 农历和节假日显示
+        lunar_text = ""
+        is_holiday = False
+        is_workday = False
+        if HAS_LUNAR:
+            solar = Solar.fromYmd(d.year, d.month, d.day)
+            lunar = solar.getLunar()
+            
+            # 获取节日 (优先显示公历，其次农历)
+            festivals = solar.getFestivals()
+            lunar_festivals = lunar.getFestivals()
+            jieqis = lunar.getJieQi()
+            
+            if festivals:
+                lunar_text = festivals[0]
+            elif lunar_festivals:
+                lunar_text = lunar_festivals[0]
+            elif jieqis:
+                lunar_text = jieqis
+            else:
+                day_name = lunar.getDayInChinese()
+                if day_name == '初一':
+                    lunar_text = lunar.getMonthInChinese() + '月'
+                else:
+                    lunar_text = day_name
+            
+            # 获取法定节假日
+            try:
+                holiday = HolidayUtil.getHoliday(d.year, d.month, d.day)
+                if holiday:
+                    if not holiday.isWork():
+                        is_holiday = True
+                    else:
+                        is_workday = True
+            except Exception:
+                pass
+            
+            # 缩短显示文字，防止太长
+            if len(lunar_text) > 3:
+                lunar_text = lunar_text[:3]
+                
+        self.lunar_text = lunar_text
+        self.is_holiday = is_holiday
+        self.is_workday = is_workday
+        
         today = date.today()
         if d == today:
             self.today_badge.show()
         else:
             self.today_badge.hide()
+            
+        if self.is_holiday:
+            self.holiday_badge.setText("休")
+            self.holiday_badge.show()
+        elif self.is_workday:
+            self.holiday_badge.setText("班")
+            self.holiday_badge.show()
+        else:
+            self.holiday_badge.hide()
+            
         self.reloadStyleSheet()
 
     def set_todos(self, todos):
@@ -3311,9 +3495,16 @@ class CalendarDayWidget(QWidget):
         if w <= 0 or h <= 0:
             return
         self.bg_label.resize(w, h)
+        
         self.date_label.resize(w - 8, 20)
         self.date_label.move(8, 4)
+        
         self.today_badge.move(w - 26, 2)
+        
+        if not self.today_badge.isHidden():
+            self.holiday_badge.move(w - 26 - 18, 5)
+        else:
+            self.holiday_badge.move(w - 20, 5)
 
         y_offset = 24
         for lbl in self._todo_labels:
@@ -3345,40 +3536,50 @@ class CalendarDayWidget(QWidget):
     def _on_add_clicked(self):
         if not self.date or not self._calendar_panel:
             return
-        text, ok = show_theme_text_input(self.window(), "添加待办", "内容：")
-        if not ok or not text.strip():
-            return
-        ts = int(datetime.combine(self.date, datetime.min.time().replace(hour=9)).timestamp())
-        parser = SiGlobal.todo_list.todos_parser
-        first_list = next(iter(parser.lists.keys()), None)
-        if first_list is None:
-            return
-        parser.lists[first_list].append({
-            "text": text.strip(),
-            "done": False,
-            "reminder": {"timestamp": ts, "repeat": "不重复", "priority": "不重要"}
-        })
-        parser.write()
-        self._calendar_panel.update_calendar()
-        self._calendar_panel._refresh_main_panel()
+        dlg = CalendarAddTodoDialog(self.window(), self.date)
+        if dlg.exec_() == QDialog.Accepted:
+            data = dlg.get_data()
+            if not data or not data["text"]:
+                return
+            parser = SiGlobal.todo_list.todos_parser
+            list_name = data["list"]
+            if list_name not in parser.lists:
+                list_name = next(iter(parser.lists.keys()), None)
+            if list_name is None:
+                return
+            parser.lists[list_name].append({
+                "text": data["text"],
+                "done": False,
+                "reminder": data["reminder"]
+            })
+            parser.write()
+            self._calendar_panel.update_calendar()
+            self._calendar_panel._refresh_main_panel()
 
     def _refresh_bg(self, hover=False):
         if not self.date:
             return
         today = date.today()
+        
+        lunar_color = SiGlobal.siui.colors['TEXT_C'] if self.is_current_month else SiGlobal.siui.colors['TEXT_E']
+            
         if self.date == today:
-            self.bg_label.setStyleSheet(f"background-color: {SiGlobal.siui.colors['PANEL_THEME']}; border-radius: 6px;")
-            self.date_label.setStyleSheet("color: #ffffff; font-weight: bold; background-color: transparent;")
+            self.bg_label.setStyleSheet(f"background-color: {SiGlobal.siui.colors['PANEL_THEME']};")
+            self.date_label.setStyleSheet("background-color: transparent;")
+            # 今天强制白色
+            self.date_label.setText(f"<span style='color: #ffffff; font-weight: bold;'>{self.date.day}</span> <span style='color: #ffffff; font-size: 10px; font-weight: normal;'>{self.lunar_text}</span>")
         else:
             if hover:
-                self.bg_label.setStyleSheet(f"background-color: {SiGlobal.siui.colors['BUTTON_HOVER']}; border-radius: 6px;")
+                self.bg_label.setStyleSheet(f"background-color: {SiGlobal.siui.colors['BUTTON_HOVER']};")
             else:
-                self.bg_label.setStyleSheet("background-color: transparent; border-radius: 6px;")
+                self.bg_label.setStyleSheet(f"background-color: {SiGlobal.siui.colors['BACKGROUND_COLOR']};")
 
             if self.is_current_month:
-                self.date_label.setStyleSheet(f"color: {SiGlobal.siui.colors['TEXT_B']}; font-weight: normal; background-color: transparent;")
+                self.date_label.setStyleSheet("background-color: transparent;")
+                self.date_label.setText(f"<span style='color: {SiGlobal.siui.colors['TEXT_B']}; font-weight: normal;'>{self.date.day}</span> <span style='color: {lunar_color}; font-size: 10px; font-weight: normal;'>{self.lunar_text}</span>")
             else:
-                self.date_label.setStyleSheet(f"color: {SiGlobal.siui.colors['TEXT_E']}; font-weight: normal; background-color: transparent;")
+                self.date_label.setStyleSheet("background-color: transparent;")
+                self.date_label.setText(f"<span style='color: {SiGlobal.siui.colors['TEXT_E']}; font-weight: normal;'>{self.date.day}</span> <span style='color: {SiGlobal.siui.colors['TEXT_E']}; font-size: 10px; font-weight: normal;'>{self.lunar_text}</span>")
 
     def reloadStyleSheet(self):
         if not self.date: return
@@ -3387,7 +3588,19 @@ class CalendarDayWidget(QWidget):
         self.today_badge.setStyleSheet(
             f"background-color: {SiGlobal.siui.colors['PANEL_THEME']}; "
             f"color: #ffffff; font-size: 11px; font-weight: bold; "
-            f"border-radius: 11px;")
+            f"border-radius: 4px;")
+            
+        if self.is_holiday:
+            self.holiday_badge.setStyleSheet(
+                f"background-color: #ff4d4f; "
+                f"color: #ffffff; font-size: 10px; font-weight: bold; "
+                f"border-radius: 3px;")
+        elif self.is_workday:
+            self.holiday_badge.setStyleSheet(
+                f"background-color: #52c41a; "
+                f"color: #ffffff; font-size: 10px; font-weight: bold; "
+                f"border-radius: 3px;")
+                
         self._refresh_bg()
 
 
@@ -3414,6 +3627,23 @@ class CalendarPanel(ThemedOptionCardPlane):
         self.month_label.setCursor(Qt.PointingHandCursor)
         self.month_label.installEventFilter(self)
         
+        self.today_btn = QPushButton("今", self.controls_container)
+        self.today_btn.setFixedSize(32, 32)
+        self.today_btn.setCursor(Qt.PointingHandCursor)
+        self.today_btn.setStyleSheet(f"""
+            QPushButton {{
+                border: 1px solid {SiGlobal.siui.colors['BORDER_COLOR']};
+                border-radius: 4px;
+                background-color: {SiGlobal.siui.colors['BACKGROUND_DARK_COLOR']};
+                color: {SiGlobal.siui.colors['TEXT_B']};
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {SiGlobal.siui.colors['BUTTON_HOVER']};
+            }}
+        """)
+        self.today_btn.clicked.connect(self._goto_today)
+        
         self.prev_btn = QPushButton("＜", self.controls_container)
         self.prev_btn.setFixedSize(32, 32)
         self.prev_btn.setCursor(Qt.PointingHandCursor)
@@ -3428,6 +3658,7 @@ class CalendarPanel(ThemedOptionCardPlane):
         
         self.controls_container.addWidget(self.month_label)
         self.controls_container.addWidget(self.next_btn, "right")
+        self.controls_container.addWidget(self.today_btn, "right")
         self.controls_container.addWidget(self.prev_btn, "right")
         
         self.body().addWidget(self.controls_container)
@@ -3453,8 +3684,8 @@ class CalendarPanel(ThemedOptionCardPlane):
         # 日期网格
         self.grid_widget = QWidget(self.body())
         self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setSpacing(4)
-        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.grid_layout.setSpacing(1)
+        self.grid_layout.setContentsMargins(1, 1, 1, 1)
         self.body().addWidget(self.grid_widget)
         self.body().addPlaceholder(8)
         
@@ -3480,6 +3711,13 @@ class CalendarPanel(ThemedOptionCardPlane):
             y, m = dlg.get_year_month()
             self.view_year = y
             self.view_month = m
+            self.update_calendar()
+            
+    def _goto_today(self):
+        today = date.today()
+        if self.view_year != today.year or self.view_month != today.month:
+            self.view_year = today.year
+            self.view_month = today.month
             self.update_calendar()
 
     def _prev_month(self):
@@ -3530,10 +3768,21 @@ class CalendarPanel(ThemedOptionCardPlane):
         self.month_label.setText(f"{self.view_year}年{self.view_month}月  ▼")
         self.controls_container.adjustSize()
 
+        today = date.today()
+        if self.view_year == today.year and self.view_month == today.month:
+            self.today_btn.hide()
+        else:
+            self.today_btn.show()
+
         reminder_todos = self._collect_reminder_todos()
 
         cal = calendar.Calendar(firstweekday=0)
         month_days = list(cal.itermonthdates(self.view_year, self.view_month))
+        
+        # 始终保持6周（42天），避免有些月份只有5周导致布局变化和横线变粗
+        while len(month_days) < 42:
+            month_days.append(month_days[-1] + timedelta(days=1))
+            
         for i, d in enumerate(month_days):
             if i < len(self.day_widgets):
                 self.day_widgets[i].set_date(d, d.month == self.view_month)
@@ -3635,6 +3884,8 @@ class CalendarPanel(ThemedOptionCardPlane):
         self.setThemeColor(SiGlobal.siui.colors["PANEL_THEME"])
         super().reloadStyleSheet()
         
+        self.grid_widget.setStyleSheet(f"background-color: {SiGlobal.siui.colors['BORDER_COLOR']}; border-radius: 4px;")
+        
         self.month_label.setStyleSheet(f"color: {SiGlobal.siui.colors['TEXT_A']};")
         nav_btn_ss = """
             QPushButton {{
@@ -3683,12 +3934,17 @@ class CalendarPanel(ThemedOptionCardPlane):
         top_h = self.header().height() + 32 + 8 + 24 + 8
         available_h = self.height() - top_h - 32
         
-        available_h = max(available_h, 6 * 64 + 5 * 4)
-        row_h = (available_h - 5 * 4) // 6
+        available_h = max(available_h, 6 * 64)
+        col_w = (w - 1) // 7
+        row_h = (available_h - 1) // 6
         
-        self.grid_widget.setFixedSize(w, 6 * row_h + 5 * 4)
+        # 重新计算w确保没有多余边缘
+        w_grid = col_w * 7 + 1
+        h_grid = row_h * 6 + 1
+        
+        self.grid_widget.setFixedSize(w_grid, h_grid)
         for dw in self.day_widgets:
-            dw.setFixedSize(col_w - 4, row_h)
+            dw.setFixedSize(col_w - 1, row_h - 1)
             
         self.body().adjustSize()
 
@@ -3801,17 +4057,38 @@ class SettingsPanel(ThemedOptionCardPlane):
         self.settings_footer_credits.setFixedHeight(22)
         self.settings_footer_credits.setHint("")
 
-        # 添加到body
-        self.body().setAdjustWidgetsSize(True)
-        self.body().addWidget(self.use_dark_mode)
-        self.body().addWidget(self.fix_position)
+        self.container.setShrinking(False)
+        self.body().setShrinking(False)
+
+        self.settings_scroll_area = QScrollArea(self.body())
+        self.settings_scroll_area.setWidgetResizable(False)
+        self.settings_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.settings_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.settings_scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.settings_scroll_area.setStyleSheet("background: transparent; border: none; background-color: transparent;")
+        self.settings_scroll_area.viewport().setAutoFillBackground(False)
+        self.settings_scroll_area.viewport().setStyleSheet("background: transparent; background-color: transparent;")
+
+        self.settings_content = SiDenseVContainer()
+        self.settings_content.setShrinking(True)
+        self.settings_content.setAdjustWidgetsSize(True)
+        self.settings_content.setSpacing(6)
+        self.settings_content.setStyleSheet("background: transparent; border: none;")
+        
+        self.settings_scroll_area.setWidget(self.settings_content)
+
+        # 添加到 settings_content
+        self.settings_content.addWidget(self.use_dark_mode)
+        self.settings_content.addWidget(self.fix_position)
         if self.button_startup is not None:
-            self.body().addWidget(self.startup_option)
-        self.body().addWidget(self.use_translucent_mode)
-        self.body().addWidget(self.translucent_opacity)
-        self.body().addWidget(self.todo_font_option)
-        self.body().addWidget(self.settings_footer_credits)
-        self.body().addPlaceholder(16)
+            self.settings_content.addWidget(self.startup_option)
+        self.settings_content.addWidget(self.use_translucent_mode)
+        self.settings_content.addWidget(self.translucent_opacity)
+        self.settings_content.addWidget(self.todo_font_option)
+        self.settings_content.addWidget(self.settings_footer_credits)
+        self.settings_content.addPlaceholder(16)
+        
+        self.settings_scroll_area.show()
 
     def reloadStyleSheet(self):
         self.setThemeColor(SiGlobal.siui.colors["PANEL_THEME"])
@@ -3853,6 +4130,62 @@ class SettingsPanel(ThemedOptionCardPlane):
             )
         )
         self.todo_font_slider.setStyleSheet(self.translucent_opacity_slider.styleSheet())
+        
+        # 强制清除背景色避免深色模式下出现白底
+        self.settings_scroll_area.setStyleSheet(
+            """
+            QScrollArea {{
+                background: transparent;
+                background-color: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 8px;
+                margin: 2px 0 2px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {};
+                border-radius: 4px;
+                min-height: 28px;
+            }}
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {{
+                background: transparent;
+                height: 0px;
+            }}
+            """.format(Color.transparency(SiGlobal.siui.colors["TEXT_D"], 0.7))
+        )
+        self.settings_scroll_area.viewport().setStyleSheet("background: transparent; background-color: transparent; border: none;")
+        self.settings_content.setStyleSheet("background: transparent; background-color: transparent; border: none;")
+        
+        # 强制重绘
+        self.settings_scroll_area.update()
+        self.settings_content.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        
+        body_h = self.container.height() - self.header().height() - self.footer().height()
+        if body_h < 0:
+            body_h = 0
+            
+        self.body().resize(self.container.width(), body_h)
+        self.settings_scroll_area.setGeometry(0, 0, self.container.width(), body_h)
+        
+        viewport_width = max(1, self.settings_scroll_area.viewport().width())
+        # FALLBACK to scroll area width if viewport width is wrong (e.g. 100 on init)
+        if viewport_width <= 100 and self.settings_scroll_area.width() > 100:
+            viewport_width = self.settings_scroll_area.width()
+            
+        self.settings_content.resize(viewport_width, self.settings_content.height())
+        self.settings_content.adjustWidgetsGeometry()
+        
+        # 补充：必须调整一次size并再次修正几何信息，否则可能排版不正确
+        self.settings_content.adjustSize()
+        self.settings_content.adjustWidgetsGeometry()
 
     def _onTranslucentOpacityChanged(self, value):
         self.translucent_opacity_value.setText(f"{value}%")
@@ -3925,14 +4258,9 @@ class SettingsWindow(QMainWindow):
         self._position_initialized = False
         self._is_maximized = False
 
-        panel_w = 520
-        self.settings_panel.resize(panel_w, self.settings_panel.height())
-        self.settings_panel.body().adjustSize()
-        self.settings_panel.adjustSize()
-        panel_h = self.settings_panel.height()
-        self.resize(panel_w + 2 * self.padding, panel_h + 2 * self.padding)
-        self.setMinimumSize(440 + 2 * self.padding, panel_h + 2 * self.padding)
         self._apply_saved_settings_geometry()
+        
+        QTimer.singleShot(0, self._sync_settings_content)
 
         SiGlobal.siui.windows["SETTINGS_WINDOW"] = self
         self.applyWindowOpacity()
@@ -3941,6 +4269,25 @@ class SettingsWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._persist_settings_geometry)
+
+    def _sync_settings_content(self):
+        panel_w = 520
+        self.settings_panel.settings_content.adjustSize()
+        self.settings_panel.settings_content.adjustWidgetsGeometry()
+        content_h = self.settings_panel.settings_content.height()
+        panel_h = content_h + self.settings_panel.header().height() + self.settings_panel.footer().height() + 3
+        if panel_h > 600:
+            panel_h = 600
+        
+        # 只在没有保存的尺寸时应用默认尺寸
+        opts = SiGlobal.todo_list.settings_parser.options
+        w = opts.get("SETTINGS_WIDTH")
+        h = opts.get("SETTINGS_HEIGHT")
+        if not (isinstance(w, int) and isinstance(h, int)):
+            self.settings_panel.resize(panel_w, panel_h)
+            self.resize(panel_w + 2 * self.padding, panel_h + 2 * self.padding)
+            
+        self.setMinimumSize(440 + 2 * self.padding, 200 + 2 * self.padding)
 
     def _createSettingsIcon(self):
         try:
@@ -4010,8 +4357,15 @@ class SettingsWindow(QMainWindow):
             if self._settings_rect_on_any_screen(rect):
                 self.setGeometry(rect)
                 self._position_initialized = True
+                
+                # 如果从配置加载了尺寸，确保子控件同步
+                self.settings_panel.resize(w - 2 * self.padding, h - 2 * self.padding)
+                
         if not self._position_initialized:
             self._moveToInitialPosition()
+        else:
+            # 确保面板在加载保存的大小后同步更新
+            self.settings_panel.resize(self.width() - 2 * self.padding, self.height() - 2 * self.padding)
 
         if maxed:
             self._is_maximized = True
