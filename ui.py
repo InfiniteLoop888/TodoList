@@ -1320,8 +1320,23 @@ class TODOListPanel(ThemedOptionCardPlane):
         new_todo.setTodoMeta(created_at=todo_created_at_ts(), today_priority=False)
         self._reposition_todo_by_rule(new_todo)
         self._syncCurrentListFromUI()
+        
+        list_name = self.current_list_name
+        if list_name in self.todo_lists:
+            grouped = self._groupedTodosForDisplay(self.todo_lists[list_name])
+            if len(grouped) != len(self._group_headers):
+                need_group_rebuild = True
+            else:
+                current_header_titles = [h.text() for h in self._group_headers]
+                expected_titles = [title for title, _ in grouped]
+                if current_header_titles != expected_titles:
+                    need_group_rebuild = True
+
         if need_group_rebuild:
             self._refreshCurrentListDisplay()
+        else:
+            self._reflowTodoGroupedSectionFromSyncedData()
+            
         self.adjustSize()
         self.updateTODOAmount()
 
