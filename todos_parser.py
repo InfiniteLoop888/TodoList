@@ -182,11 +182,13 @@ class TODOParser:
         restored["origin_list"] = None
         restored["deleted_at"] = None
         restored["archived_at"] = None
-        if restored.get("done", False):
-            restored["completed_rank"] = self.next_completed_rank(target_list)
-        else:
-            restored["completed_rank"] = None
+        
+        # 恢复时不修改原有的 order_key 和 completed_rank，
+        # 以便它回到归档前的位置
+        if restored.get("order_key") is None:
             restored["order_key"] = self.next_order_key(target_list)
+        if restored.get("done", False) and restored.get("completed_rank") is None:
+            restored["completed_rank"] = self.next_completed_rank(target_list)
 
         self.lists[source_list].pop(index)
         self.lists[target_list].append(restored)

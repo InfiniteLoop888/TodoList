@@ -915,7 +915,7 @@ class AppHeaderPanel(SiLabel):
 
         self.unfold_button = SiToggleButton(self)
         self.unfold_button.setFixedHeight(32)
-        self.unfold_button.attachment().setText("0个待办事项")
+        self.unfold_button.attachment().setText("没有待办")
         self.unfold_button.setChecked(True)
 
         self.calendar_button = SiSimpleButton(self)
@@ -1052,7 +1052,12 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.body().addWidget(self.todo_scroll_area)
 
         # 底部拖动调整高度
-        self._user_body_height = None
+        opts = SiGlobal.todo_list.settings_parser.options
+        saved_height = opts.get("TODO_PANEL_USER_BODY_HEIGHT", None)
+        try:
+            self._user_body_height = int(saved_height) if saved_height is not None else None
+        except (ValueError, TypeError):
+            self._user_body_height = None
         self._resizing_bottom = False
         self._resizing_right = False
         self._resizing_corner = False
@@ -1162,8 +1167,10 @@ class TODOListPanel(ThemedOptionCardPlane):
         self.loadLists({})
 
     def updateTODOAmount(self):
-        todo_amount = len(self._todoWidgets())
-        self.todoAmountChanged.emit(todo_amount)
+        todos = self._todoWidgets()
+        todo_amount = len(todos)
+        active_amount = len([w for w in todos if not w.check_box.isChecked()])
+        self.todoAmountChanged.emit(active_amount)
 
         if todo_amount == 0:
             self.no_todo_label.setText(self._emptyPlaceholderText())
@@ -1631,8 +1638,6 @@ class TODOListPanel(ThemedOptionCardPlane):
             # 去掉勾选前的 _refresh_completed_ranks_from_ui，避免在分组模式下，物理位置靠后的新勾选待办被其他组的已完成项抢走最高 rank
         else:
             widget.completed_rank = None
-            # 先统一未完成项的 order_key，再用 order_key 计算插入位置，避免相对顺序漂移
-            self._refresh_order_keys_from_ui()
         self._reposition_todo_by_rule(widget)
         # 勾选路径在 reposition 后可能仍需把 rank 收敛到最终视觉顺序；未完成路径这里再刷一次是幂等的
         if widget.check_box.isChecked():
@@ -1660,11 +1665,25 @@ class TODOListPanel(ThemedOptionCardPlane):
                 widget.completed_rank = None
 
     def _refresh_order_keys_from_ui(self):
-        todos = self._todoWidgets()
-        next_order = len(todos)
-        for widget in todos:
-            widget.order_key = next_order
-            next_order -= 1
+        # 仅刷新未完成项的 order_key，让已完成项保留原来的 order_key，以便取消完成时能回到大致的原位
+        uncompleted_todos = [w for w in self._todoWidgets() if not w.check_box.isChecked()]
+        
+        # 为了不破坏 order_key 的全局尺度（避免与已完成项的旧 order_key 失去相对位置关系），
+        # 我们收集当前所有未完成项的 order_key，降序排序后，按当前的视觉顺序重新分配给它们。
+        current_keys = []
+        for w in uncompleted_todos:
+            key = getattr(w, "order_key", 0)
+            current_keys.append(key if isinstance(key, (int, float)) else 0)
+            
+        current_keys.sort(reverse=True)
+        
+        # 确保 order_key 严格单调递减，避免拖拽后分配了相同的 order_key 导致重启后顺序丢失
+        for i in range(len(current_keys) - 1, 0, -1):
+            if current_keys[i-1] <= current_keys[i]:
+                current_keys[i-1] = current_keys[i] + 1
+                
+        for widget, new_key in zip(uncompleted_todos, current_keys):
+            widget.order_key = new_key
 
     def _refreshListButtonsState(self):
         for list_name, button in self.list_buttons.items():
@@ -2188,6 +2207,15 @@ class TODOListPanel(ThemedOptionCardPlane):
         self._setCurrentList(self.current_list_name, sync_before_switch=False)
         self._save_lists_to_disk()
 
+    def _sortTodoList(self, list_name):
+        if list_name not in self.todo_lists:
+            return
+        undone = [todo for todo in self.todo_lists[list_name] if not todo.get("done", False)]
+        done = [todo for todo in self.todo_lists[list_name] if todo.get("done", False)]
+        undone.sort(key=lambda item: int(item.get("order_key", 0)), reverse=True)
+        done.sort(key=lambda item: int(item.get("completed_rank", 0)), reverse=True)
+        self.todo_lists[list_name] = undone + done
+
     def _restore_system_todo(self, widget):
         parser = ensure_todo_parser()
         self._syncCurrentListFromUI(save_to_disk=False)
@@ -2196,6 +2224,7 @@ class TODOListPanel(ThemedOptionCardPlane):
             return
         target_list, _ = restored
         self.todo_lists = parser.lists
+        self._sortTodoList(target_list)
         self._rebuildListButtons()
         self._setCurrentList(target_list, sync_before_switch=False)
         self._save_lists_to_disk()
@@ -2226,9 +2255,14 @@ class TODOListPanel(ThemedOptionCardPlane):
         todos_to_restore = list(self.todo_lists.get(list_name, []))
         if not todos_to_restore:
             return
+        target_lists = set()
         for item in todos_to_restore:
-            parser.restore_todo_from_system_list(item["id"])
+            res = parser.restore_todo_from_system_list(item["id"])
+            if res is not None:
+                target_lists.add(res[0])
         self.todo_lists = parser.lists
+        for t_list in target_lists:
+            self._sortTodoList(t_list)
         self._rebuildListButtons()
         self._setCurrentList(self.current_list_name, sync_before_switch=False)
         self._save_lists_to_disk()
@@ -2586,6 +2620,21 @@ class TODOListPanel(ThemedOptionCardPlane):
         w._sidebar_width_anim = anim
         anim.start()
 
+    def _save_user_body_height(self):
+        opts = SiGlobal.todo_list.settings_parser
+        if self._user_body_height is None:
+            if "TODO_PANEL_USER_BODY_HEIGHT" in opts.options:
+                opts.options.pop("TODO_PANEL_USER_BODY_HEIGHT")
+                opts.write()
+        else:
+            opts.modify("TODO_PANEL_USER_BODY_HEIGHT", self._user_body_height)
+            opts.write()
+
+    def _save_main_window_width(self, width):
+        opts = SiGlobal.todo_list.settings_parser
+        opts.modify("MAIN_WINDOW_WIDTH", width)
+        opts.write()
+
     def eventFilter(self, obj, event):
         if hasattr(self, '_resize_handle') and obj is self._resize_handle:
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -2602,10 +2651,12 @@ class TODOListPanel(ThemedOptionCardPlane):
             elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 self._resizing_bottom = False
                 obj.releaseMouse()
+                self._save_user_body_height()
                 return True
             elif event.type() == QEvent.MouseButtonDblClick:
                 self._user_body_height = None
                 self.adjustSize()
+                self._save_user_body_height()
                 return True
 
         if hasattr(self, '_right_resize_handle') and obj is self._right_resize_handle:
@@ -2622,6 +2673,7 @@ class TODOListPanel(ThemedOptionCardPlane):
             elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 self._resizing_right = False
                 obj.releaseMouse()
+                self._save_main_window_width(getattr(self.window(), "container_v", self).width())
                 return True
 
         if hasattr(self, '_corner_resize_handle') and obj is self._corner_resize_handle:
@@ -2643,6 +2695,8 @@ class TODOListPanel(ThemedOptionCardPlane):
             elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 self._resizing_corner = False
                 obj.releaseMouse()
+                self._save_user_body_height()
+                self._save_main_window_width(getattr(self.window(), "container_v", self).width())
                 return True
 
         if event.type() == QEvent.Enter:
@@ -4115,13 +4169,13 @@ class SettingsPanel(ThemedOptionCardPlane):
         self.setThemeColor(SiGlobal.siui.colors["PANEL_THEME"])
         super().reloadStyleSheet()
         text_d = SiGlobal.siui.colors["TEXT_D"]
-        self.settings_footer_credits.setText(
-            '<a href="https://github.com/InfiniteLoop888/TodoList" '
-            'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
-        )
         # self.settings_footer_credits.setText(
-        #     'style="color:{}; font-size:11px; text-decoration:none;">可爱湘 <span style="color:red;">❤️</span></a>'.format(text_d)
+        #     '<a href="https://github.com/InfiniteLoop888/TodoList" '
+        #     'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
         # )
+        self.settings_footer_credits.setText(
+            'style="color:{}; font-size:11px; text-decoration:none;">可爱湘 <span style="color:red;">❤️</span></a>'.format(text_d)
+        )
         self.translucent_opacity_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.todo_font_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.translucent_opacity_slider.setStyleSheet(
@@ -5044,7 +5098,14 @@ class TODOApplication(QMainWindow):
 
         # 创建垂直容器
         self.container_v = SiDenseVContainer(self)
-        self.container_v.setFixedWidth(500)
+        
+        opts = SiGlobal.todo_list.settings_parser.options
+        saved_width = opts.get("MAIN_WINDOW_WIDTH", 500)
+        try:
+            w = max(self.min_container_width, int(saved_width))
+        except (ValueError, TypeError):
+            w = 500
+        self.container_v.setFixedWidth(w)
         self.container_v.move(self.extra_left_space, self.padding)
         self.container_v.setSpacing(0)
         self.container_v.setShrinking(True)
@@ -5097,7 +5158,7 @@ class TODOApplication(QMainWindow):
         # 改为给内容容器加阴影，视觉保持一致且更稳定。
         self.container_v.setGraphicsEffect(shadow)
 
-        self.resize(500 + self.extra_left_space, 800)
+        self.resize(self.container_v.width() + self.extra_left_space, 800)
         SiGlobal.siui.reloadAllWindowsStyleSheet()
 
         # 读取 todos.ini 清单数据
