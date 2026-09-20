@@ -52,13 +52,13 @@ python start.py
 
 ### 自行打包（PyInstaller）
 
-若官方 Release 无法在你的环境运行，可自行打包，例如：
+请使用仓库里的 `start.spec`（会排除未使用的 Qt 模块，并把默认配置与图标打进包内），不要直接 `pyinstaller start.py`：
 
 ```bash
-pyinstaller start.py --noconsole
+python -m PyInstaller start.spec --noconfirm
 ```
 
-打包后请将 **`options.ini`、`todos.ini`** 以及 **`icons/icons.dat`** 放到可执行文件同目录（或与你的打包配置一致）；首次启动仍会向「文档/TodoList」同步配置。具体路径以实际报错为准。
+产物在 `dist/start/start.exe`。首次启动仍会把包内的 `options.ini` / `todos.ini` 同步到「文档/TodoList」。
 
 ## 第三方资源
 

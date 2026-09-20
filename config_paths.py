@@ -22,6 +22,15 @@ def application_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def bundled_resource_dir() -> Path:
+    """打包资源目录：onedir 下为 _MEIPASS（通常是 _internal），源码运行则为项目根。"""
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+    return application_dir()
+
+
 def documents_dir() -> Path:
     try:
         from PyQt5.QtCore import QStandardPaths
@@ -76,10 +85,10 @@ def ensure_user_ini_files() -> Tuple[str, str]:
         dst = cfg / filename
         if dst.exists():
             return str(dst)
-        src = app / filename
-        if src.exists():
-            shutil.copy2(src, dst)
-            return str(dst)
+        for src in (app / filename, bundled_resource_dir() / filename):
+            if src.exists():
+                shutil.copy2(src, dst)
+                return str(dst)
         if default_text is not None:
             dst.write_text(default_text, encoding="utf-8")
         else:

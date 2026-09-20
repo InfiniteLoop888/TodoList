@@ -1,8 +1,27 @@
-import numpy
 import os
+import sys
 
-current_module_path = os.path.dirname(os.path.abspath(__file__))
-data_file_path = os.path.join(current_module_path, './icons.dat')
+import numpy
+
+
+def _icons_dat_path():
+    """源码运行时在 icons/ 旁；打包后优先 _MEIPASS/icons，其次 exe 旁的 icons/。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [os.path.join(here, "icons.dat")]
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(meipass, "icons", "icons.dat"))
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, "icons", "icons.dat"))
+        candidates.append(os.path.join(exe_dir, "icons.dat"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return candidates[0]
+
+
+data_file_path = _icons_dat_path()
 
 class IconDictionary:
     def __init__(self, library_path=data_file_path, color=None):

@@ -12,13 +12,13 @@ except ImportError:
 
 from components import ThemedOptionCardPlane
 from icons import IconDictionary
-from PyQt5.Qt import QColor, QPoint
 from PyQt5.QtCore import (
     QByteArray,
     QCoreApplication,
     QEvent,
     QEventLoop,
     QEasingCurve,
+    QPoint,
     QRect,
     QRectF,
     QSize,
@@ -27,7 +27,7 @@ from PyQt5.QtCore import (
     QVariantAnimation,
     pyqtSignal,
 )
-from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap, QResizeEvent
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPixmap, QResizeEvent
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QAction,
@@ -75,13 +75,13 @@ from siui.gui.tooltip import ToolTipWindow
 
 SiGlobal.todo_list = NewGlobal()
 
-# 创建锁定位置变量
-SiGlobal.todo_list.position_locked = False
-
 # 创建设置文件解析器并写入全局变量（持久化在「文档/TodoList」，首次从程序目录复制）
 _options_ini_path, _todos_ini_path = ensure_user_ini_files()
 SiGlobal.todo_list.settings_parser = SettingsParser(_options_ini_path)
 SiGlobal.todo_list.todos_parser = TODOParser(_todos_ini_path)
+SiGlobal.todo_list.position_locked = bool(
+    SiGlobal.todo_list.settings_parser.options.get("FIXED_POSITION", False)
+)
 
 
 def todo_item_font_px():
@@ -5095,6 +5095,8 @@ class TODOApplication(QMainWindow):
         self.move_animation.setBias(1)
         self.move_animation.setCurrent([self.x(), self.y()])
         self.move_animation.ticked.connect(self._onMoveAnimationTicked)
+        self.move_animation.finished.connect(self._onMoveAnimationFinished)
+        self._persist_position_after_move = False
 
         # 创建垂直容器
         self.container_v = SiDenseVContainer(self)
@@ -5147,6 +5149,7 @@ class TODOApplication(QMainWindow):
             self.settings_panel.button_startup.toggled.connect(self._onStartupToggledFromSettings)
 
         self._initTrayIcon()
+        self._connect_session_persist()
 
         self.todo_list_panel.todoAmountChanged.connect(self._onTODOAmountChanged)
 
@@ -5374,6 +5377,35 @@ class TODOApplication(QMainWindow):
         self.move(x, y)
         self.fixed_position = QPoint(x, y)
 
+    def _window_rect_at(self, x, y):
+        w = max(int(self.width()), 80)
+        h = max(int(self.height()), 80)
+        return QRect(int(x), int(y), w, h)
+
+    def _position_intersects_any_screen(self, x, y):
+        rect = self._window_rect_at(x, y)
+        screens = QApplication.screens() or []
+        return any(screen.availableGeometry().intersects(rect) for screen in screens)
+
+    def _clamp_position_to_screens(self, x, y):
+        rect = self._window_rect_at(x, y)
+        screens = QApplication.screens() or []
+        if not screens:
+            return int(x), int(y)
+        nearest = min(
+            screens,
+            key=lambda s: (
+                0
+                if s.availableGeometry().intersects(rect)
+                else abs(s.availableGeometry().center().x() - rect.center().x())
+                + abs(s.availableGeometry().center().y() - rect.center().y())
+            ),
+        )
+        geo = nearest.availableGeometry()
+        nx = min(max(int(x), geo.x() - rect.width() + 80), geo.x() + geo.width() - 80)
+        ny = min(max(int(y), geo.y() - 16), geo.y() + geo.height() - 80)
+        return nx, ny
+
     def _moveToStartupPosition(self):
         options = SiGlobal.todo_list.settings_parser.options
         has_custom_position = bool(options.get("HAS_CUSTOM_POSITION", False))
@@ -5381,15 +5413,42 @@ class TODOApplication(QMainWindow):
         saved_y = options.get("FIXED_POSITION_Y")
 
         if has_custom_position and isinstance(saved_x, int) and isinstance(saved_y, int):
-            screen = QApplication.primaryScreen()
-            if screen is not None:
-                geometry = screen.availableGeometry()
-                if geometry.contains(saved_x, saved_y):
-                    self.move(saved_x, saved_y)
-                    self.fixed_position = QPoint(saved_x, saved_y)
-                    return
+            x, y = saved_x, saved_y
+            if not self._position_intersects_any_screen(x, y):
+                x, y = self._clamp_position_to_screens(x, y)
+            self.move(x, y)
+            self.fixed_position = QPoint(x, y)
+            return
 
         self._moveToTopRight()
+
+    def _connect_session_persist(self):
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.aboutToQuit.connect(self._persist_main_window_position)
+        if hasattr(app, "commitDataRequest"):
+            app.commitDataRequest.connect(lambda *_: self._persist_main_window_position())
+
+    def _persist_main_window_position(self):
+        if getattr(self, "_persisting_main_position", False):
+            return
+        parser = SiGlobal.todo_list.settings_parser
+        x, y = int(self.fixed_position.x()), int(self.fixed_position.y())
+        if (
+            parser.options.get("HAS_CUSTOM_POSITION") is True
+            and parser.options.get("FIXED_POSITION_X") == x
+            and parser.options.get("FIXED_POSITION_Y") == y
+        ):
+            return
+        self._persisting_main_position = True
+        try:
+            parser.modify("HAS_CUSTOM_POSITION", True)
+            parser.modify("FIXED_POSITION_X", x)
+            parser.modify("FIXED_POSITION_Y", y)
+            parser.write()
+        finally:
+            self._persisting_main_position = False
 
     def _quitFromTray(self):
         self._quitting = True
@@ -5509,6 +5568,13 @@ class TODOApplication(QMainWindow):
         if SiGlobal.todo_list.position_locked is False:
             self.fixed_position = self.pos()
 
+    def _onMoveAnimationFinished(self, pos):
+        if SiGlobal.todo_list.position_locked is False:
+            self.fixed_position = QPoint(int(pos[0]), int(pos[1]))
+        if self._persist_position_after_move:
+            self._persist_position_after_move = False
+            self._persist_main_window_position()
+
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
         top_drag_height = self.padding + self.header_panel.height()
@@ -5535,6 +5601,12 @@ class TODOApplication(QMainWindow):
         self._dragging_by_header = False
         if SiGlobal.todo_list.position_locked is True:
             self.moveTo(self.fixed_position.x(), self.fixed_position.y())
+            return
+        self._persist_position_after_move = True
+        if not self.move_animation.isActive():
+            self.fixed_position = self.pos()
+            self._persist_position_after_move = False
+            self._persist_main_window_position()
 
     def eventFilter(self, obj, event):
         return super().eventFilter(obj, event)
@@ -5543,6 +5615,7 @@ class TODOApplication(QMainWindow):
         if getattr(self, "tray_icon", None) is not None:
             self.tray_icon.hide()
 
+        self._persist_main_window_position()
         super().closeEvent(a0)
 
         # 获取当前清单数据，并写入 todos.ini
@@ -5551,12 +5624,6 @@ class TODOApplication(QMainWindow):
         parser.lists = parser._ensure_required_lists(todo_lists)
         parser.todos = list(next(iter(parser.user_lists().values()), []))
         parser.write()
-
-        # 写入设置到 options.ini
-        SiGlobal.todo_list.settings_parser.modify("HAS_CUSTOM_POSITION", True)
-        SiGlobal.todo_list.settings_parser.modify("FIXED_POSITION_X", self.fixed_position.x())
-        SiGlobal.todo_list.settings_parser.modify("FIXED_POSITION_Y", self.fixed_position.y())
-        SiGlobal.todo_list.settings_parser.write()
 
         SiGlobal.siui.windows["TOOL_TIP"].close()
         QCoreApplication.quit()
