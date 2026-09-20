@@ -4197,9 +4197,13 @@ class SettingsPanel(ThemedOptionCardPlane):
         super().reloadStyleSheet()
         text_d = SiGlobal.siui.colors["TEXT_D"]
         self.settings_footer_credits.setText(
-            '<p style="color:{}; font-size:11px; margin:0;">可爱湘 '
-            '<span style="color:#E74C3C;">❤</span></p>'.format(text_d)
+            '<a href="https://github.com/InfiniteLoop888/TodoList" '
+            'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
         )
+        # self.settings_footer_credits.setText(
+        #     '<p style="color:{}; font-size:11px; margin:0;">可爱湘 '
+        #     '<span style="color:#E74C3C;">❤</span></p>'.format(text_d)
+        # )
         self.translucent_opacity_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.todo_font_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.translucent_opacity_slider.setStyleSheet(
