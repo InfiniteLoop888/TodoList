@@ -44,9 +44,10 @@
 
 
 ### 从源码运行
-在项目根目录安装依赖（需已安装 Python 与 PyQt5 等，与 PyQt-SiliconUI 要求一致）后执行：
+需已安装 Python 3.8+。在项目根目录安装依赖后执行：
 
 ```bash
+python -m pip install -r requirements.txt
 python start.py
 ```
 

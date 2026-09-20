@@ -147,6 +147,33 @@ def todo_origin_list_field(value):
     return s
 
 
+_settings_write_timer = None
+_SETTINGS_WRITE_DEBOUNCE_MS = 400
+
+
+def schedule_settings_write():
+    """拖拽改尺寸等频繁操作只改内存，合并后再写盘。"""
+    global _settings_write_timer
+    app = QApplication.instance()
+    if app is None:
+        flush_settings_write()
+        return
+    if _settings_write_timer is None:
+        _settings_write_timer = QTimer()
+        _settings_write_timer.setSingleShot(True)
+        _settings_write_timer.timeout.connect(flush_settings_write)
+    _settings_write_timer.start(_SETTINGS_WRITE_DEBOUNCE_MS)
+
+
+def flush_settings_write():
+    global _settings_write_timer
+    if _settings_write_timer is not None:
+        _settings_write_timer.stop()
+    parser = getattr(SiGlobal.todo_list, "settings_parser", None)
+    if parser is not None:
+        parser.write()
+
+
 def lock_position(state):
     SiGlobal.todo_list.position_locked = state
 
@@ -2625,15 +2652,15 @@ class TODOListPanel(ThemedOptionCardPlane):
         if self._user_body_height is None:
             if "TODO_PANEL_USER_BODY_HEIGHT" in opts.options:
                 opts.options.pop("TODO_PANEL_USER_BODY_HEIGHT")
-                opts.write()
+                schedule_settings_write()
         else:
             opts.modify("TODO_PANEL_USER_BODY_HEIGHT", self._user_body_height)
-            opts.write()
+            schedule_settings_write()
 
     def _save_main_window_width(self, width):
         opts = SiGlobal.todo_list.settings_parser
         opts.modify("MAIN_WINDOW_WIDTH", width)
-        opts.write()
+        schedule_settings_write()
 
     def eventFilter(self, obj, event):
         if hasattr(self, '_resize_handle') and obj is self._resize_handle:
@@ -4169,12 +4196,9 @@ class SettingsPanel(ThemedOptionCardPlane):
         self.setThemeColor(SiGlobal.siui.colors["PANEL_THEME"])
         super().reloadStyleSheet()
         text_d = SiGlobal.siui.colors["TEXT_D"]
-        # self.settings_footer_credits.setText(
-        #     '<a href="https://github.com/InfiniteLoop888/TodoList" '
-        #     'style="color:{}; font-size:11px; text-decoration:none;">InfiniteLoop888</a>'.format(text_d)
-        # )
         self.settings_footer_credits.setText(
-            'style="color:{}; font-size:11px; text-decoration:none;">可爱湘 <span style="color:red;">❤️</span></a>'.format(text_d)
+            '<p style="color:{}; font-size:11px; margin:0;">可爱湘 '
+            '<span style="color:#E74C3C;">❤</span></p>'.format(text_d)
         )
         self.translucent_opacity_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
         self.todo_font_value.setStyleSheet("color: {}".format(SiGlobal.siui.colors["TEXT_C"]))
@@ -5616,6 +5640,7 @@ class TODOApplication(QMainWindow):
             self.tray_icon.hide()
 
         self._persist_main_window_position()
+        flush_settings_write()
         super().closeEvent(a0)
 
         # 获取当前清单数据，并写入 todos.ini

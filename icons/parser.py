@@ -3,6 +3,10 @@ import sys
 
 import numpy
 
+_raw_icon_svgs = None
+_raw_icon_path = None
+_colored_icons = {}
+
 
 def _icons_dat_path():
     """源码运行时在 icons/ 旁；打包后优先 _MEIPASS/icons，其次 exe 旁的 icons/。"""
@@ -23,28 +27,44 @@ def _icons_dat_path():
 
 data_file_path = _icons_dat_path()
 
+
+def _load_raw_icons(library_path):
+    """解密一次 icons.dat，缓存未着色的 SVG 文本。"""
+    global _raw_icon_svgs, _raw_icon_path
+    if _raw_icon_svgs is not None and _raw_icon_path == library_path:
+        return _raw_icon_svgs
+
+    # ！注意！  你不应使用这些文件，他们已经过加密处理
+    # 如果你需要这些图标文件，你可以直接在 flaticon.com 免费获取他们
+    with open(library_path, "rb") as f:
+        library_raw = f.read()
+    library_list = list(library_raw)
+    library = bytes(
+        list((numpy.array(library_list) + numpy.array(range(len(library_list))) * 17) % 255)
+    ).decode()
+
+    raw = {}
+    for item in library.split("!!!")[1:]:
+        name, data = item.split("###")
+        raw[name] = data
+    _raw_icon_svgs = raw
+    _raw_icon_path = library_path
+    return raw
+
+
 class IconDictionary:
     def __init__(self, library_path=data_file_path, color=None):
+        cache_key = (library_path, color)
+        cached = _colored_icons.get(cache_key)
+        if cached is not None:
+            self.icons = cached
+            return
 
-        # ！注意！  你不应使用这些文件，他们已经过加密处理
-        # 如果你需要这些图标文件，你可以直接在 flaticon.com 免费获取他们
-
-        # 读取数据并解密
-        f = open(library_path, 'rb')
-        library_raw = f.read()
-        library_list = list(library_raw)
-        library = bytes(list((numpy.array(library_list) + numpy.array(range(len(library_list))) * 17) % 255)).decode()  # 解密
-
-        # 整理成字典
-        items = library.split('!!!')
-        names = []
-        datas = []
-        for item in items[1:]:
-            name, data = item.split('###')
-            data = data.replace('/>', ' fill="{}" />'.format(color))
-            names.append(name)
-            datas.append(data.encode())
-        self.icons = dict(zip(names, datas))
+        colored = {}
+        for name, data in _load_raw_icons(library_path).items():
+            colored[name] = data.replace("/>", ' fill="{}" />'.format(color)).encode()
+        _colored_icons[cache_key] = colored
+        self.icons = colored
 
     def get(self, name):
         svg_data = self.icons[name]
